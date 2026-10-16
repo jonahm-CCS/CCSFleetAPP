@@ -1,0 +1,149 @@
+CCS FLEET — RENDER + PERSISTENT SQLITE
+Hosted release 1.0.0
+
+This is a complete hosted app, including all updates through filtered CSV
+exports. It is NOT a copy-over patch for your local app. It is prepared for
+Render but has not been deployed to your account.
+
+YES, YOU CAN KEEP CHANGING IT
+Keep the code in a private GitHub repository. Push updated code and Render
+can redeploy it centrally. The database and uploads remain on the persistent
+disk at /var/data/fleet.sqlite. Do not commit a database or secrets to Git.
+With a disk, deployments briefly stop the old process before starting the
+new one. Keep one instance. Schedule bigger changes outside busy hours.
+
+1. SAVE YOUR CURRENT DATA
+In the local app YOU are currently using, open Activity & backup and click
+Download complete database backup. Keep that .sqlite file safely on your
+computer. Use this current backup, not a database from an older app ZIP.
+The backup includes vehicle and driver records, source uploads, attached
+files, saved comparisons, disposed vehicles and audit history.
+For cutover, ask editors to stop changing the local app, take a fresh backup,
+import it online and then have everyone use the shared URL. Old local copies
+will not synchronize with Render.
+
+2. PUT THE APP IN A PRIVATE REPOSITORY
+Create a private GitHub repository, for example ccs-fleet.
+Upload the CONTENTS of the ccs-fleet-render folder to the repository root.
+render.yaml, package.json, package-lock.json and HOSTING-GUIDE.txt should be
+at the root, with public/, server/, vendor/ and tests/ beside them.
+This package contains reference evidence images, so keep the repository private.
+Do not upload your .sqlite backup, .env files, API secrets or node_modules.
+The included .gitignore provides those exclusions.
+
+3. CREATE GOOGLE COMPANY SIGN-IN
+In Google Cloud Console, use a project owned by CCS's Google Workspace
+organization. Configure Google Auth Platform / OAuth consent as Internal
+and create an OAuth client of type Web application. Only openid, email and
+profile are used; no access to Gmail, Drive or Samsara is requested.
+Save the client ID and client secret for Render's environment settings.
+Once the Render URL is assigned in step 4, add this exact authorized redirect:
+  https://YOUR-SERVICE.onrender.com/auth/callback
+The callback URL must match exactly, including HTTPS and /auth/callback.
+Never put the client secret in GitHub, a browser file or a chat message.
+
+4. CREATE THE RENDER SERVICE
+In Render choose New > Blueprint and connect the private repository.
+Select the supplied render.yaml. It configures:
+  Runtime: Node.js 24
+  Build: npm ci --omit=dev
+  Start: npm start
+  Health check: /healthz
+  Instances: 1
+  Plan: 1c-2g (2 GB RAM, suitable as a starting point for document/OCR imports)
+  Persistent disk: 10 GB mounted at /var/data
+Review Render's current price before creating the paid service.
+
+Enter the requested environment values:
+  CCS_ALLOWED_DOMAIN       Your Workspace domain, e.g. go-ccs.com
+  CCS_ADMIN_EMAILS         Comma-separated administrator emails
+  CCS_EDITOR_EMAILS        Comma-separated fleet editor emails
+  GOOGLE_CLIENT_ID         OAuth Web client ID from step 3
+  GOOGLE_CLIENT_SECRET     OAuth client secret from step 3
+If you don't have other editors yet, put your administrator email in the
+editor list as well. Admin permissions take precedence.
+
+The Blueprint also sets NODE_ENV=production, CCS_HOSTED=true, NODE_VERSION=24
+and CCS_DATA_DIR=/var/data. Keep these values.
+The app uses Render's RENDER_EXTERNAL_URL automatically for the public URL.
+Add that URL's /auth/callback to Google in step 3 before trying to sign in.
+
+Alternative: create a paid Web Service manually with the same settings,
+attach the disk under Advanced / Disks and add the same environment values.
+Do not choose a Static Site or a free service without a persistent disk.
+
+5. SIGN IN AND IMPORT ONCE
+Open the Render service URL and sign in using a CCS administrator account.
+The first page asks for your current .sqlite backup from step 1.
+Upload it and wait for the registry to open. Maximum import is 512 MB.
+Initial import becomes locked as soon as fleet data is present; another
+person cannot overwrite the live database from the setup page.
+If an upload loses connection, refresh before retrying: it may have finished.
+Compare your vehicle totals, drivers, latest source dates and disposed list
+with the local app before inviting everyone.
+
+6. SHARE ACCESS
+All Google Workspace accounts in CCS_ALLOWED_DOMAIN can sign in as viewers.
+CCS_EDITOR_EMAILS can edit records and review/import sources.
+CCS_ADMIN_EMAILS can also import the initial database and download backups.
+Change these lists in Render's environment settings and redeploy to update
+permissions. Sessions last 8 hours; roles are checked on every request.
+There is no shared fleet password. Unauthenticated requests cannot read the
+app, evidence images, API data or uploaded documents.
+
+7. OPTIONAL COMPANY DOMAIN
+After the Render URL works, add fleet.go-ccs.com (or your chosen domain) as a
+custom domain in Render and follow the DNS instructions it supplies.
+Set CCS_BASE_URL=https://fleet.go-ccs.com in the service environment.
+Add https://fleet.go-ccs.com/auth/callback to the Google OAuth client.
+Redeploy. Share the custom domain; the app accepts only the configured host.
+
+8. BACKUPS AND RECOVERY
+The app creates a consistent SQLite VACUUM INTO backup daily, checked hourly,
+and keeps 14 dated copies under /var/data/backups. A new backup is also made
+after initial import. Failures are printed in Render logs.
+These copies use the SAME disk, so they are not offsite disaster protection.
+An administrator should download a backup from Activity & backup regularly
+and before major imports, and store it in approved company backup storage.
+No third-party backup credentials are included or configured automatically.
+Do not copy the live fleet.sqlite file while the server is writing to it.
+Do not rely solely on a disk snapshot as a database backup.
+
+Recovery after a mistaken edit/import:
+- Choose a consistent .sqlite backup. Use Render Shell to list the files in
+  /var/data/backups, or transfer a saved backup under /var/data using Render's
+  supported SSH/SCP access. Never upload it to the Git repository.
+- Set CCS_RESTORE_FILE to its path relative to /var/data, for example
+  backups/2026-10-16-SNAPSHOT-ID.sqlite, and redeploy.
+- During startup, before accepting requests, the app preserves a safety copy
+  under /var/data/recovery and restores the selected records and audit history.
+- Remove CCS_RESTORE_FILE after recovery. A content hash prevents the same
+  backup from being reapplied automatically on subsequent restarts.
+Restoring intentionally returns the records to that backup's point in time.
+The recovery folder is not automatically pruned; manage it after verification.
+
+9. FUTURE UPDATES
+- Download a backup first for significant changes.
+- Update code in GitHub (I can prepare future changed files for you).
+- Render deploys the selected branch, or use Manual Deploy > latest commit.
+- Keep /var/data and the existing disk attached. Do not replace the service.
+- Verify health, sign-in, counts, imports and exports after deployment.
+Do not edit application files only through Render Shell: those changes are
+not durable across code deployments. Make code changes in the repository.
+
+VALIDATION AND LIMITS
+Automated tests cover authentication token validation, anonymous access,
+viewer/editor/admin restrictions, cross-origin setup protection, one-time
+migration, attachments, restart persistence, audit attribution and recovery.
+Real Google account sign-in, Render deployment, DNS and browser interaction
+still require validation in your configured account. The package has not
+been deployed and no paid service has been created.
+Source file formats and the manual discrepancy review remain unchanged.
+This setup has one application instance and synchronous SQLite access; if
+concurrent usage or uploads outgrow it, PostgreSQL is the later upgrade.
+
+REFERENCES
+https://render.com/docs/web-services
+https://render.com/docs/disks
+https://render.com/docs/blueprint-spec
+https://developers.google.com/identity/openid-connect/openid-connect

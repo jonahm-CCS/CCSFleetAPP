@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: ccs-fleet
+    runtime: node
+    plan: 1c-2g
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /healthz
+    numInstances: 1
+    disk:
+      name: ccs-fleet-data
+      mountPath: /var/data
+      sizeGB: 10
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "24"
+      - key: CCS_HOSTED
+        value: "true"
+      - key: CCS_DATA_DIR
+        value: /var/data
+      - key: CCS_ALLOWED_DOMAIN
+        sync: false
+      - key: CCS_ADMIN_EMAILS
+        sync: false
+      - key: CCS_EDITOR_EMAILS
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
