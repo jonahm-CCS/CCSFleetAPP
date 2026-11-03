@@ -110,7 +110,7 @@ export async function handleFleet(state,path,method,b){
      const v={...old,version:old.version+1,updatedAt:now()};
      tx(()=>{for(const e of refs)put('evidence',{...e,match:'Confirmed accounting match',confirmedVin:old.vin,confirmedAt:now()});put('vehicles',v);audit('Accounting match confirmed',v,'User confirmed the linked asset-list VIN reference. Lease and asset overlap is allowed.',old);});send(res,{ok:true});return;
     }
-    if(method==='POST'&&vm[2]==='crashes'){const v=updateCrash(old,b);tx(()=>{put('vehicles',v);audit('Crash repair '+b.action,v,b.action==='complete'?b.completionNote:b.description,old);});send(res,v);return;}
+    if(method==='POST'&&vm[2]==='crashes'){const v=updateCrash(old,b);tx(()=>{put('vehicles',v);audit('Crash repair '+b.action,v,b.action==='cancel'?b.cancellationNote:b.action==='complete'?b.completionNote:b.description,old);});send(res,v);return;}
     if(method==='POST'&&vm[2]==='section'){
      requireThat(['','Services','Valet','Sales'].includes(b.section),'Choose Services, Valet, Sales, or leave section blank.');
      const v={...old,section:b.section,sectionSource:'Manual',version:old.version+1,updatedAt:now()};

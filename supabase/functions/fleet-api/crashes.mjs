@@ -7,12 +7,14 @@ export function updateCrash(old,body){
  let record;
  if(body.action==='record'){
   if(old.operationalState==='Disposed')fail('Restore the vehicle before starting a crash repair.');
-  if(history.some(x=>x.status!=='Complete'))fail('This vehicle already has an active crash repair. Update that record.');
-  record={id:randomUUID(),createdAt:stamp,status:'In repair'};history.push(record);
- }else if(['update','complete'].includes(body.action)){
-  record=history.find(x=>x.id===body.crashId);if(!record||record.status==='Complete')fail('Choose an active crash repair.');
- }else fail('Choose record, update or complete.');
- if(body.action==='complete'){
+  if(history.some(x=>!['Complete','Canceled'].includes(x.status)))fail('This vehicle already has an active crash repair. Update that record.');
+  record={id:randomUUID(),createdAt:stamp,status:'In repair',previousOperationalState:old.operationalState,previousCondition:old.condition};history.push(record);
+ }else if(['update','complete','cancel'].includes(body.action)){
+  record=history.find(x=>x.id===body.crashId);if(!record||['Complete','Canceled'].includes(record.status))fail('Choose an active crash repair.');
+ }else fail('Choose record, update, complete or cancel.');
+ if(body.action==='cancel'){
+  record.cancellationNote=text(body.cancellationNote,'a cancellation reason',true);record.status='Canceled';record.canceledAt=stamp;
+ }else if(body.action==='complete'){
   record.completedDate=date(body.completedDate,'repair completion date',true);if(record.completedDate<record.crashDate)fail('Completion cannot be before the crash date.');
   record.completionNote=text(body.completionNote,'a repair completion note',true);record.status='Complete';record.completedAt=stamp;
  }else{
@@ -21,6 +23,6 @@ export function updateCrash(old,body){
   if(record.expectedReturn&&record.expectedReturn<record.crashDate)fail('Expected return cannot be before the crash date.');
  }
  record.updatedAt=stamp;
- const active=history.some(x=>x.status!=='Complete');
- return {...old,crashHistory:history,crashRepairActive:active,operationalState:old.operationalState==='Disposed'?'Disposed':active?'Out of service':body.action==='complete'?'Unknown':old.operationalState,condition:body.action==='record'?'Needs attention':old.condition,checks:{},verificationStatus:'Not yet verified',version:old.version+1,updatedAt:stamp};
+ const active=history.some(x=>!['Complete','Canceled'].includes(x.status));
+ return {...old,crashHistory:history,crashRepairActive:active,operationalState:old.operationalState==='Disposed'?'Disposed':active?'Out of service':body.action==='cancel'?(record.previousOperationalState||'Unknown'):body.action==='complete'?'Unknown':old.operationalState,condition:body.action==='record'?'Needs attention':body.action==='cancel'?(record.previousCondition||'Unknown'):old.condition,checks:{},verificationStatus:'Not yet verified',version:old.version+1,updatedAt:stamp};
 }
