@@ -23,4 +23,8 @@ body{background:#0a1421}aside{background:#091421;color:#a0b6ca;border-color:#253
 
 .insurance-collapse>summary{padding:20px;cursor:pointer;font-size:16px;font-weight:700}.insurance-collapse>summary .muted{font-size:12px;font-weight:400}.insurance-sublist{border-top:1px solid #294254;margin-top:12px;padding-top:12px}.insurance-sublist>summary{cursor:pointer;font-weight:600;padding:10px 0}.insurance-scroll{max-height:320px;overflow:auto;margin-top:12px}
 
-[hidden]{display:none!important} .kv dd{overflow-wrap:anywhere;white-space:pre-wrap} #snapshot-date{margin:16px 32px 0}
+/* Active crash repairs: yellow row plus an explicit status badge. */
+tr.crash-repair-row>td{background:#514315!important;border-bottom-color:#89752a;color:#fff7d0}
+tr.crash-repair-row:hover>td{background:#62521a!important}
+tr.crash-repair-row>td:first-child{border-left:4px solid #facc15}
+.badge.crash-repair-badge{background:#facc15;color:#241d00;font-weight:800;border:1px solid #fde047}

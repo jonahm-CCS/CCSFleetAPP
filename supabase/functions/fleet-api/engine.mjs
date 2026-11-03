@@ -1,0 +1,160 @@
+import {Buffer} from 'node:buffer';
+import {randomUUID,createHash} from 'node:crypto';
+import {extname} from 'node:path';
+import {updateCrash} from './crashes.mjs';
+import {driverNameMatches} from './insurance-drivers.mjs';
+import {connectDrivers,planDriverLinks} from './driver-links.mjs';
+import {setupReconciliation} from './reconciliation.mjs';
+const ROOT='/tmp';
+export const FIELDS=['section','unitNumber','vin','year','make','model','plate','plateState','location','region','ownership','registrationExpiry','insuranceExpiry','odometer','odometerDate','fuelProvider','fuelCard','tollTag','condition','operationalState','lastOilChange','lastOilMileage','pmDueDate','pmDueMiles','tireCondition','mechanicalNotes','notes'];
+export const CHECKS=['identity','location','ownership','registration','insurance','condition','maintenance','equipment'];
+const now=()=>new Date().toISOString();
+const fail=(message,status=400)=>{throw Object.assign(new Error(message),{status});};
+const requireThat=(ok,msg,status)=>{if(!ok)fail(msg,status);};
+export function parseCSV(text){
+ const rows=[];let row=[],cell='',quoted=false;
+ for(let i=0;i<text.length;i++){const c=text[i];if(c==='"'){if(quoted&&text[i+1]==='"'){cell+='"';i++;}else quoted=!quoted;}else if(c===','&&!quoted){row.push(cell);cell='';}else if(c==='\n'&&!quoted){row.push(cell.replace(/\r$/,''));rows.push(row);row=[];cell='';}else cell+=c;}
+ requireThat(!quoted,'Unclosed quote in CSV.');if(cell||row.length){row.push(cell.replace(/\r$/,''));rows.push(row);}
+ const headers=(rows.shift()||[]).map(x=>x.trim().replace(/^\uFEFF/,''));requireThat(headers.includes('vin'),'CSV needs a vin column.');requireThat(new Set(headers).size===headers.length,'Duplicate CSV headers.');requireThat(rows.length<=3000,'Limit CSV to 3,000 rows.');
+ return rows.filter(r=>r.some(c=>c.trim())).map((r,i)=>{requireThat(r.length===headers.length,`CSV row ${i+2} has the wrong number of columns.`);return Object.fromEntries(headers.map((h,j)=>[h,r[j].trim()]));});
+}
+function clean(input,old={}){
+ const v={...old};for(const key of FIELDS){if(input[key]!==undefined){requireThat(['string','number'].includes(typeof input[key]),`Invalid ${key}.`);v[key]=String(input[key]).trim();requireThat(v[key].length<5000,`${key} is too long.`);}else if(v[key]===undefined)v[key]='';}
+ requireThat(['','Services','Valet','Sales'].includes(v.section),'Choose Services, Valet, Sales, or leave section blank.');
+ if(input.section!==undefined&&input.section!==old.section)v.sectionSource='Manual';
+ v.vin=v.vin.toUpperCase().replace(/\s/g,'');v.plate=v.plate.toUpperCase();v.plateState=v.plateState.toUpperCase();
+ requireThat(!v.vin||/^[A-HJ-NPR-Z0-9]{17}$/.test(v.vin),'VIN must be 17 characters without I, O or Q. Leave an unknown VIN blank.');
+ requireThat(v.vin||v.unitNumber||v.model,'Provide a VIN, CCS number, or provisional asset description.');
+ for(const k of ['registrationExpiry','insuranceExpiry','odometerDate','lastOilChange','pmDueDate'])if(v[k])requireThat(/^\d{4}-\d{2}-\d{2}$/.test(v[k])&&!isNaN(Date.parse(v[k]))&&new Date(v[k]).toISOString().slice(0,10)===v[k],`Invalid ${k} date.`);
+ for(const k of ['year','odometer','lastOilMileage','pmDueMiles'])if(v[k])requireThat(Number.isFinite(Number(v[k]))&&Number(v[k])>=0&&(!['year'].includes(k)||Number.isInteger(Number(v[k]))&&Number(v[k])>=1900&&Number(v[k])<=2100),`Invalid ${k}.`);
+ requireThat(['Unknown','Available','Maintenance','Out of service','Disposed'].includes(v.operationalState||'Unknown'),'Invalid operational status.');
+ if(old.crashRepairActive&&v.operationalState!=='Disposed')v.operationalState='Out of service';v.operationalState=v.operationalState||'Unknown';v.condition=v.condition||'Unknown';v.driver=old.driver||'';v.id=old.id||randomUUID();v.createdAt=old.createdAt||now();v.updatedAt=now();v.version=(old.version||0)+1;
+ v.checks=old.checks||{};v.verificationStatus=old.verificationStatus||'Not yet verified';
+ if(FIELDS.some(k=>String(v[k]??'')!==String(old[k]??''))){v.verificationStatus='Not yet verified';v.checks={};v.verifiedAt='';v.verifiedBy='';}
+ return v;
+}
+
+export async function handleFleet(state,path,method,b){
+ const all=k=>structuredClone(state.records[k]||[]);
+ const get=(k,id)=>{const r=all(k).find(x=>x.id===id);if(!r)fail('Record not found.',404);return r;};
+ const put=(k,v)=>{if(k==='vehicles'&&v.vin&&!v.mergedInto&&all(k).some(x=>x.id!==v.id&&!x.mergedInto&&x.vin===v.vin))fail('That VIN already exists.',409);const rows=state.records[k]??=[];const i=rows.findIndex(x=>x.id===v.id);if(i<0)rows.push(structuredClone(v));else rows[i]=structuredClone(v);return v;};
+ const tx=fn=>{const before=structuredClone(state);try{return fn();}catch(e){state.records=before.records;state.audit=before.audit;throw e;}};
+ const audit=(action,v,note,before=null)=>state.audit.push({id:randomUUID(),time:now(),action,vehicleId:v?.id||'',note,before,after:v});
+ let status=200,headers={},body='';
+ const res={writeHead:(s,h)=>{status=s;headers={...headers,...h};},end:v=>{body=v;}};
+ // One-time, non-destructive section upgrade for existing databases.
+ const needsSection=all('vehicles').filter(v=>v.section===undefined);
+ if(needsSection.length)tx(()=>{
+  const refs=all('evidence'),mapping={'service':'Services','services':'Services','valet trash':'Valet','valet':'Valet','sales':'Sales'};let filled=0;
+  for(const old of needsSection){
+   const labels=[...new Set(refs.filter(e=>e.vehicleId===old.id&&e.sourceId==='fleet'&&e.match==='Exact VIN').map(e=>mapping[String(e.raw?.['Service Level']||'').toLowerCase().trim()]).filter(Boolean))];
+   const section=labels.length===1?labels[0]:'';if(section)filled++;
+   put('vehicles',{...old,section,sectionSource:section?'Fleet Sheet / Service Level':'Not recorded',version:old.version+1});
+  }
+  audit('Section upgrade',null,`${filled} CCS sections populated from explicit Fleet Sheet Service Level labels; other records left blank.`);
+ });
+ const reconciliation=setupReconciliation({all,get,put,tx,audit,clean,ROOT});
+ const linkDrivers=()=>connectDrivers({all:k=>k==='drivers'?reconciliation.currentDrivers():all(k),put,tx,audit});
+
+ const token='public-shared';
+ const version=(old,b)=>requireThat(old.version===b.version,'Record changed in another window. Close and reopen it before saving.',409);
+ const active=()=>all('vehicles').filter(v=>!v.mergedInto);
+ const uniqueUnit=v=>requireThat(!v.unitNumber||!active().some(x=>x.id!==v.id&&String(x.unitNumber).toUpperCase()===v.unitNumber.toUpperCase()),'That CCS number already exists. Review the duplicate.',409);
+ const send=(res,data,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(data));};
+ const csvCell=v=>'"'+String(v??'').replace(/^[=+@-]/,"'$&").replace(/"/g,'""')+'"';
+ async function run(){
+   if(path==='/api/bootstrap'&&method==='GET'){tx(()=>reconciliation.syncAssetCoverage());send(res,{driverLinkChecks:planDriverLinks(active(),reconciliation.currentDrivers()),insuranceComparison:reconciliation.insuranceReport(),token,vehicles:active(),drivers:reconciliation.currentDrivers(),driverEvidence:all('driverEvidence'),assignmentEvidence:all('assignmentEvidence'),sourceTypes:reconciliation.sourceTypes,uploads:all('uploads').map(u=>({id:u.id,sourceId:u.sourceId,filename:u.filename,uploadedAt:u.uploadedAt,acceptedAt:u.acceptedAt,status:u.status,storageAvailable:!!u.storagePath})),initialCCAvailable:false,sources:all('sources'),evidence:all('evidence'),issues:all('issues'),documents:all('documents').map(({base64,...d})=>d),audit:state.audit.slice(-300).reverse()});return;}
+   const aliasMatch=path.match(/^\/api\/drivers\/([^/]+)\/aliases$/);
+   if(aliasMatch&&method==='POST'){
+    const old=get('drivers',aliasMatch[1]);version(old,b);
+    requireThat(reconciliation.currentDrivers().some(d=>d.id===old.id),'Driver is not in the current CC roster.',409);
+    requireThat(Array.isArray(b.aliases)&&b.aliases.length<=20&&b.aliases.every(x=>typeof x==='string'&&x.trim().length>=2&&x.trim().length<=120),'Enter up to 20 alternate full names.');
+    const aliases=[...new Set(b.aliases.map(x=>x.trim().replace(/\s+/g,' ')))];
+    requireThat(!aliases.some(name=>reconciliation.currentDrivers().some(d=>d.id!==old.id&&driverNameMatches(d,name))),'An alias matches another current driver. Resolve that identity before saving.',409);
+    tx(()=>{put('drivers',{...old,aliases,version:old.version+1,updatedAt:now()});audit('Driver aliases',null,`${old.name}: insurance aliases changed to ${aliases.join('; ')||'(none)'}.`);});
+    send(res,{ok:true});return;
+   }
+   if(path==='/api/issues/confirm'&&method==='POST'){
+    requireThat(Array.isArray(b.ids)&&b.ids.length>0&&b.ids.length<=10000&&b.ids.every(id=>typeof id==='string'),'Select review items to confirm.');
+    requireThat(typeof b.note==='string'&&b.note.trim().length>=10,'Add a review note (10+ characters).');
+    const items=[...new Set(b.ids)].map(id=>get('issues',id));
+    requireThat(items.every(i=>i.status==='Open'),'Some selected items changed. Refresh and select again.',409);
+    tx(()=>{for(const i of items){put('issues',{...i,status:'Resolved',acknowledged:true,resolution:b.note.trim(),resolvedAt:now()});audit('Bulk review confirmed',get('vehicles',i.vehicleId),`${i.message}: ${b.note.trim()}`);}});
+    send(res,{ok:true,confirmed:items.length});return;
+   }
+   if(path==='/api/issues/ignore'&&method==='POST'){
+    requireThat(Array.isArray(b.ids)&&b.ids.length>0&&b.ids.length<=10000&&b.ids.every(id=>typeof id==='string'),'Choose review items to ignore.');
+    const items=[...new Set(b.ids)].map(id=>get('issues',id));
+    requireThat(items.every(i=>i.status==='Open'),'Review items changed. Refresh and try again.',409);
+    tx(()=>{for(const i of items){put('issues',{...i,status:'Ignored',resolution:'Explicitly ignored; existing values retained.',resolvedAt:now()});audit('Ignore review',get('vehicles',i.vehicleId),i.message);}reconciliation.rememberIgnoredIssues(items);});
+    send(res,{ok:true,ignored:items.length});return;
+   }
+   if(path==='/api/source-upload/jobs'&&method==='POST'){const result=await reconciliation.preview(b);send(res,{id:result.id,status:'complete',result});return;}
+   if(path==='/api/source-upload/preview'&&method==='POST'){send(res,await reconciliation.preview(b));return;}
+   if(path==='/api/source-upload/commit'&&method==='POST'){const result=reconciliation.commit(b);result.autoLinked=linkDrivers();send(res,result);return;}
+   const up=path.match(/^\/api\/source-upload\/([^/]+)(?:\/(download))?$/);
+   if(up&&method==='GET'){const u=get('uploads',up[1]);if(up[2]){res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Disposition':`attachment; filename="${u.filename}"`});res.end(Buffer.from(u.base64,'base64'));}else send(res,reconciliation.publicPreview(u));return;}
+   if(path==='/api/driver-register'&&method==='POST'){
+    fail('The Driver Register is maintained only through the CC upload in Source Comparison.',403);
+   }
+   if(path==='/api/vehicles'&&method==='POST'){const v=clean(b);uniqueUnit(v);tx(()=>{put('vehicles',v);audit('Create',v,'Manual vehicle record created.');});linkDrivers();send(res,get('vehicles',v.id),201);return;}
+   const vm=path.match(/^\/api\/vehicles\/([^/]+)(?:\/(verify|merge|driver|section|crashes|confirm-asset))?$/);
+   if(vm){const old=get('vehicles',vm[1]);requireThat(!old.mergedInto,'This record was merged.',409);version(old,b||{});
+    if(method==='PUT'&&!vm[2]){const v=clean(b,old);if(String(v.unitNumber)!==String(old.unitNumber))uniqueUnit(v);tx(()=>{put('vehicles',v);audit('Edit',v,b.note||'Master record updated; verification reset.',old);});linkDrivers();send(res,get('vehicles',v.id));return;}
+    if(method==='POST'&&vm[2]==='confirm-asset'){
+     const source=all('sources').find(s=>s.id==='balance');
+     const refs=all('evidence').filter(e=>e.active!==false&&e.vehicleId===old.id&&e.sourceId==='balance'&&(!source?.lastAcceptedUploadId||e.uploadId===source.lastAcceptedUploadId||e.automatic&&e.uploadId===source.pendingUploadId));
+     requireThat(refs.length>0,'No accounting reference is linked to this vehicle.');
+     requireThat(refs.every(e=>!e.needsReview&&(!e.reportedVin||e.reportedVin===old.vin)),'Resolve the conflicting accounting identifiers first.',409);
+     requireThat(refs.every(e=>{const suffix=String(e.raw?.vinSuffix||e.fields?.vinSuffix||e.reportedVin||'').replace(/[^A-Z0-9]/gi,'').toUpperCase();return suffix.length>=6&&old.vin&&old.vin.endsWith(suffix);}), 'The accounting VIN reference does not match this vehicle. Recheck Source Comparison.',409);
+     const v={...old,version:old.version+1,updatedAt:now()};
+     tx(()=>{for(const e of refs)put('evidence',{...e,match:'Confirmed accounting match',confirmedVin:old.vin,confirmedAt:now()});put('vehicles',v);audit('Accounting match confirmed',v,'User confirmed the linked asset-list VIN reference. Lease and asset overlap is allowed.',old);});send(res,{ok:true});return;
+    }
+    if(method==='POST'&&vm[2]==='crashes'){const v=updateCrash(old,b);tx(()=>{put('vehicles',v);audit('Crash repair '+b.action,v,b.action==='complete'?b.completionNote:b.description,old);});send(res,v);return;}
+    if(method==='POST'&&vm[2]==='section'){
+     requireThat(['','Services','Valet','Sales'].includes(b.section),'Choose Services, Valet, Sales, or leave section blank.');
+     const v={...old,section:b.section,sectionSource:'Manual',version:old.version+1,updatedAt:now()};
+     tx(()=>{put('vehicles',v);audit('CCS section',v,b.section?`Section set to ${b.section}.`:'CCS section cleared.',old);});send(res,v);return;
+    }
+    if(method==='POST'&&vm[2]==='driver'){
+     requireThat(typeof b.driver==='string'&&b.driver.trim().length<=120,'Driver name must be 120 characters or fewer.');
+     let driver=b.driver.trim(),driverId='';if(b.driverId){const d=get('drivers',b.driverId);driver=d.name;driverId=d.id;}else if(driver){const hits=all('drivers').filter(d=>d.name.trim().toUpperCase()===driver.toUpperCase());requireThat(hits.length<=1,'Multiple registered drivers share that name. Select the correct driver.');if(hits.length)driverId=hits[0].id;}requireThat(!driver||driver.length>=2,'Enter the driver’s first and last name.');
+     const v={...old,driver,driverId,version:old.version+1,updatedAt:now()};
+     tx(()=>{put('vehicles',v);audit('Driver assignment',v,driver?`Driver set to ${driver}.`:'Driver assignment removed.',old);});send(res,v);return;
+    }
+    if(method==='POST'&&vm[2]==='verify'){
+     requireThat(typeof b.reviewer==='string'&&b.reviewer.trim().length>=2,'Enter reviewer name.');requireThat(typeof b.note==='string'&&b.note.trim().length>=10,'Describe the verification evidence (10+ characters).');
+     const checks=Object.fromEntries(CHECKS.map(k=>[k,b.checks?.[k]===true]));const complete=CHECKS.every(k=>checks[k]);
+     if(checks.identity)requireThat(old.vin&&old.plate,'VIN and plate are required to verify identity.');if(checks.location)requireThat(old.location,'Record the current location first.');if(checks.ownership)requireThat(old.ownership,'Record the ownership / lease details first.');
+     for(const k of ['registration','insurance'])if(checks[k])requireThat(old[k+'Expiry']&&old[k+'Expiry']>=now().slice(0,10),`Record a current ${k} expiry before verifying.`);
+     if(checks.condition)requireThat(old.condition&&old.condition!=='Unknown','Record condition before verifying.');
+     if(complete)requireThat(!old.crashRepairActive,'Complete the crash repair before verifying this vehicle.');
+     if(complete)requireThat(!all('issues').some(i=>i.vehicleId===old.id&&i.status==='Open'),'Resolve open review items before completing verification.');
+     const v={...old,checks,verifiedBy:b.reviewer.trim(),verifiedAt:complete?now():'',verificationNote:b.note.trim(),verificationStatus:complete?'Verified':'In progress',version:old.version+1,updatedAt:now()};tx(()=>{put('vehicles',v);audit('Verification',v,b.reviewer+': '+b.note,old);});send(res,v);return;
+    }
+    if(method==='POST'&&vm[2]==='merge'){
+     const target=get('vehicles',b.targetId);version(target,{version:b.targetVersion});requireThat(target.id!==old.id&&!target.mergedInto,'Choose a different active destination.');requireThat(typeof b.note==='string'&&b.note.length>=10,'Explain why these records describe the same vehicle.');
+     requireThat(!old.driver||!target.driver||old.driver===target.driver,'These records have different drivers. Reconcile assignments before merging.',409);
+     tx(()=>{put('vehicles',{...old,mergedInto:target.id,version:old.version+1});for(const kind of ['evidence','issues','documents'])for(const e of all(kind).filter(e=>e.vehicleId===old.id))put(kind,{...e,vehicleId:target.id,originalVehicleId:old.id});const next={...target,crashHistory:[...(target.crashHistory||[]),...(old.crashHistory||[])],crashRepairActive:!!(target.crashRepairActive||old.crashRepairActive),operationalState:target.operationalState==='Disposed'?'Disposed':target.crashRepairActive||old.crashRepairActive?'Out of service':target.operationalState,driver:target.driver||old.driver||'',driverId:target.driverId||old.driverId||'',checks:{},verificationStatus:'Not yet verified',version:target.version+1,updatedAt:now()};put('vehicles',next);audit('Merge',next,`${old.vin||old.model} merged into ${target.vin||target.model}. ${b.note}`,old);});send(res,{ok:true});return;
+    }
+   }
+   const im=path.match(/^\/api\/issues\/([^/]+)$/);if(im&&method==='PUT'){const i=get('issues',im[1]);requireThat(['Resolved','Open'].includes(b.status),'Invalid issue status.');requireThat(typeof b.note==='string'&&b.note.trim().length>=10,'Add a resolution note (10+ characters).');const v=get('vehicles',i.vehicleId);tx(()=>{put('issues',{...i,status:b.status,resolution:b.note,resolvedAt:now()});put('vehicles',{...v,checks:{},verificationStatus:'Not yet verified',version:v.version+1});audit('Review',v,`${i.message}: ${b.note}`);});send(res,{ok:true});return;}
+   if(path==='/api/evidence'&&method==='POST'){
+    const v=get('vehicles',b.vehicleId);requireThat(!v.mergedInto,'Record merged.');requireThat(typeof b.sourceName==='string'&&b.sourceName.trim(),'Source name required.');requireThat(typeof b.note==='string'&&b.note.length>=3,'Evidence note required.');
+    const sid='manual-'+createHash('sha256').update(b.sourceName.trim()).digest('hex').slice(0,12);const e={id:randomUUID(),vehicleId:v.id,sourceId:sid,locator:String(b.locator||'Manual entry'),match:'Manual evidence',fields:{},raw:{note:b.note},reportedVin:v.vin};
+    tx(()=>{put('sources',{id:sid,name:b.sourceName,note:'Manually recorded evidence',status:'Loaded'});put('evidence',e);audit('Evidence',v,b.sourceName+': '+b.note);});send(res,e);return;
+   }
+   if(path.startsWith('/api/import/'))fail('Use the source-specific upload preview and discrepancy approval workflow.',410);
+   if(path==='/api/documents'&&method==='POST'){
+    const v=get('vehicles',b.vehicleId);requireThat(typeof b.base64==='string'&&typeof b.filename==='string','File required.');const bytes=Buffer.from(b.base64,'base64');requireThat(bytes.length>0&&bytes.length<=5*1024*1024,'File must be 1 byte to 5 MB.');const ext=extname(b.filename).toLowerCase();const ok=ext==='.pdf'&&bytes.subarray(0,5).toString()==='%PDF-'||ext==='.png'&&bytes.subarray(0,8).toString('hex')==='89504e470d0a1a0a'||['.jpg','.jpeg'].includes(ext)&&bytes.subarray(0,3).toString('hex')==='ffd8ff';requireThat(ok,'Upload a valid PDF, PNG, or JPEG.');
+    const d={id:randomUUID(),vehicleId:v.id,filename:b.filename.replace(/[^\w. -]/g,'_').slice(0,150),category:String(b.category||'Other'),base64:bytes.toString('base64'),bytes:bytes.length,createdAt:now()};tx(()=>{put('documents',d);audit('Document',v,d.filename+' attached.');});send(res,{id:d.id},201);return;
+   }
+   const dm=path.match(/^\/api\/documents\/([^/]+)$/);if(dm&&method==='GET'){const d=get('documents',dm[1]);res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Disposition':`attachment; filename="${d.filename}"`});res.end(Buffer.from(d.base64,'base64'));return;}
+   if(path==='/api/export.csv'&&method==='GET'){res.writeHead(200,{'Content-Type':'text/csv','Content-Disposition':'attachment; filename="CCS-vehicles.csv"'});const fields=[...FIELDS,'driver','verificationStatus'];res.end('\uFEFF'+[fields.join(','),...active().map(v=>fields.map(k=>csvCell(v[k])).join(','))].join('\r\n'));return;}
+   if(path==='/api/backup'&&method==='GET'){res.writeHead(200,{'Content-Type':'application/json','Content-Disposition':'attachment; filename="CCS-fleet-shared-backup.json"'});res.end(JSON.stringify({format:'ccs-fleet-shared-v1',exportedAt:now(),state}));return;}
+
+ fail('Endpoint not found.',404);
+ }
+ await run();
+ return {status,headers,body};
+}
