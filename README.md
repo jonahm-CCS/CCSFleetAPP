@@ -1,11 +1,11 @@
 # CCS Fleet: GitHub Pages + Supabase
 
 The website stays at https://jonahm-ccs.github.io/CCSFleetAPP/.
-This branch prepares the editable shared version. It is not yet deployed.
+The editable shared version uses Supabase for persistent records and uploads.
 
 ## Architecture
 
-GitHub Pages serves the interface. A Supabase Edge Function runs the existing reconciliation and fleet rules. Postgres stores shared records with an atomic revision check; concurrent changes return a conflict rather than overwriting another employee's work. Uploaded source files and attachments are stored in the private `fleet-files` bucket and downloaded through the API. The API is designed for public access without sign-in, as requested; deployment requires explicit public-write approval. No secret keys belong in this repository or browser code.
+GitHub Pages serves the interface. A Supabase Edge Function runs the existing reconciliation and fleet rules. Postgres stores shared records with an atomic revision check; concurrent changes return a conflict rather than overwriting another employee's work. Uploaded source files and attachments are stored in the private `fleet-files` bucket and downloaded through the API. The API is designed for public access without sign-in, as requested; public-write access was explicitly approved by the owner. No secret keys belong in this repository or browser code.
 
 PDF and Word text/OCR extraction happens in the browser using pinned PDF.js, Tesseract, and JSZip versions. OCR and source-matching exceptions remain reviewable. CSV and Excel parsing runs in the Edge Function. Large scanned documents can take time.
 
@@ -23,7 +23,7 @@ The latest 30 committed state revisions are retained in Postgres for rollback. T
 4. Verify the health endpoint and real upload/edit/download tests before merging the frontend to the Pages publishing branch.
 5. The API address is declared at the top of `app.js`. Keep the GitHub Pages publishing source unchanged.
 
-The database and storage bucket have been provisioned. Edge Function deployment and the Pages switch are pending. Employee-number lockouts are not included in this no-sign-in version.
+The database, storage bucket, and Edge Function are deployed. The frontend is published from the main branch on GitHub Pages. Employee-number lockouts are not included in this no-sign-in version.
 
 ## Checks
 
