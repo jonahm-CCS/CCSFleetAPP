@@ -63,7 +63,18 @@ export async function handleFleet(state,path,method,b){
  const send=(res,data,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(data));};
  const csvCell=v=>'"'+String(v??'').replace(/^[=+@-]/,"'$&").replace(/"/g,'""')+'"';
  async function run(){
-   if(path==='/api/bootstrap'&&method==='GET'){tx(()=>reconciliation.syncAssetCoverage());send(res,{driverLinkChecks:planDriverLinks(active(),reconciliation.currentDrivers()),insuranceComparison:reconciliation.insuranceReport(),token,vehicles:active(),drivers:reconciliation.currentDrivers(),driverEvidence:all('driverEvidence'),assignmentEvidence:all('assignmentEvidence'),sourceTypes:reconciliation.sourceTypes,uploads:all('uploads').map(u=>({id:u.id,sourceId:u.sourceId,filename:u.filename,uploadedAt:u.uploadedAt,acceptedAt:u.acceptedAt,status:u.status,storageAvailable:!!u.storagePath})),initialCCAvailable:false,sources:all('sources'),evidence:all('evidence'),issues:all('issues'),documents:all('documents').map(({base64,...d})=>d),audit:state.audit.slice(-300).reverse()});return;}
+   if(path==='/api/bootstrap'&&method==='GET'){tx(()=>reconciliation.syncAssetCoverage());send(res,{driverLinkChecks:planDriverLinks(active(),reconciliation.currentDrivers()),insuranceComparison:reconciliation.insuranceReport(),token,vehicles:active(),drivers:reconciliation.currentDrivers(),archivedDrivers:all('drivers').filter(d=>d.archived),driverEvidence:all('driverEvidence'),assignmentEvidence:all('assignmentEvidence'),sourceTypes:reconciliation.sourceTypes,uploads:all('uploads').map(u=>({id:u.id,sourceId:u.sourceId,filename:u.filename,uploadedAt:u.uploadedAt,acceptedAt:u.acceptedAt,status:u.status,storageAvailable:!!u.storagePath})),initialCCAvailable:false,sources:all('sources'),evidence:all('evidence'),issues:all('issues'),documents:all('documents').map(({base64,...d})=>d),audit:state.audit.slice(-300).reverse()});return;}
+   const archiveMatch=path.match(/^\/api\/drivers\/([^/]+)\/archive$/);
+   if(archiveMatch&&method==='POST'){
+    const old=get('drivers',archiveMatch[1]);version(old,b);
+    requireThat(typeof b.archived==='boolean','Choose archive or restore.');
+    requireThat(typeof b.note==='string'&&b.note.trim().length>=3&&b.note.length<=5000,'Enter a reason (3–5,000 characters).');
+    requireThat(!!old.archived!==b.archived,'Driver status changed. Refresh and try again.',409);
+    if(!b.archived){const source=all('sources').find(s=>s.id==='cc');requireThat(all('driverEvidence').some(e=>e.driverId===old.id&&e.sourceId==='cc'&&e.uploadId===source?.lastAcceptedUploadId),'This driver is absent from the current CC roster. Upload the updated CC roster before restoring.',409);}
+    tx(()=>{put('drivers',{...old,archived:b.archived,archivedAt:b.archived?now():old.archivedAt,archiveNote:b.archived?b.note.trim():old.archiveNote,restoredAt:b.archived?old.restoredAt:now(),statusHistory:[...(old.statusHistory||[]),{archived:b.archived,note:b.note.trim(),at:now()}],version:old.version+1,updatedAt:now()});
+     if(b.archived)for(const v of active().filter(v=>v.driverId===old.id||!v.driverId&&driverNameMatches(old,v.driver)))put('vehicles',{...v,driver:'',driverId:'',version:v.version+1,updatedAt:now()});
+     audit(b.archived?'Driver archived':'Driver restored',null,old.name+': '+b.note.trim());});send(res,{ok:true});return;
+   }
    const aliasMatch=path.match(/^\/api\/drivers\/([^/]+)\/aliases$/);
    if(aliasMatch&&method==='POST'){
     const old=get('drivers',aliasMatch[1]);version(old,b);
@@ -118,7 +129,7 @@ export async function handleFleet(state,path,method,b){
     }
     if(method==='POST'&&vm[2]==='driver'){
      requireThat(typeof b.driver==='string'&&b.driver.trim().length<=120,'Driver name must be 120 characters or fewer.');
-     let driver=b.driver.trim(),driverId='';if(b.driverId){const d=get('drivers',b.driverId);driver=d.name;driverId=d.id;}else if(driver){const hits=all('drivers').filter(d=>d.name.trim().toUpperCase()===driver.toUpperCase());requireThat(hits.length<=1,'Multiple registered drivers share that name. Select the correct driver.');if(hits.length)driverId=hits[0].id;}requireThat(!driver||driver.length>=2,'Enter the driver’s first and last name.');
+     let driver=b.driver.trim(),driverId='';if(b.driverId){const d=get('drivers',b.driverId);requireThat(!d.archived,'Archived drivers cannot be assigned.');driver=d.name;driverId=d.id;}else if(driver){const hits=all('drivers').filter(d=>d.name.trim().toUpperCase()===driver.toUpperCase());requireThat(hits.length<=1,'Multiple registered drivers share that name. Select the correct driver.');if(hits.length){requireThat(!hits[0].archived,'Archived drivers cannot be assigned.');driverId=hits[0].id;}}requireThat(!driver||driver.length>=2,'Enter the driver’s first and last name.');
      const v={...old,driver,driverId,version:old.version+1,updatedAt:now()};
      tx(()=>{put('vehicles',v);audit('Driver assignment',v,driver?`Driver set to ${driver}.`:'Driver assignment removed.',old);});send(res,v);return;
     }

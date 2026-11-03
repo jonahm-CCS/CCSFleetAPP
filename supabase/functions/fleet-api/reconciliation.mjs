@@ -17,7 +17,7 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
  const vehicles=()=>all('vehicles').filter(v=>!v.mergedInto);
  const fingerprint=()=>hash({v:all('vehicles').map(v=>[v.id,v.version]),d:all('drivers').map(d=>[d.id,d.version]),ignored:all('ignoredDiscrepancies').map(i=>[i.id,i.active])});
  const findDrivers=f=>all('drivers').filter(d=>f.employeeId&&normalized(d.employeeId)===normalized(f.employeeId)||f.email&&normalized(d.email)===normalized(f.email)||f.name&&normalized(d.name)===normalized(f.name));
- function currentDrivers(){const source=all('sources').find(s=>s.id==='cc');if(!source?.lastAcceptedUploadId)return [];const ids=new Set(all('driverEvidence').filter(e=>e.sourceId==='cc'&&e.uploadId===source.lastAcceptedUploadId).map(e=>e.driverId));return all('drivers').filter(d=>ids.has(d.id));}
+ function currentDrivers(){const source=all('sources').find(s=>s.id==='cc');if(!source?.lastAcceptedUploadId)return [];const ids=new Set(all('driverEvidence').filter(e=>e.sourceId==='cc'&&e.uploadId===source.lastAcceptedUploadId).map(e=>e.driverId));return all('drivers').filter(d=>ids.has(d.id)&&!d.archived);}
  function insuranceReport(){const source=all('sources').find(s=>s.id==='drivers');if(!source?.lastAcceptedUploadId&&!source?.pendingUploadId)return null;const u=all('uploads').find(u=>u.id===(source.lastAcceptedUploadId||source.pendingUploadId));if(!u)return all('baseline')[0]?.insuranceComparison||null;const report=compareInsurance(currentDrivers(),u.rows,source.lastAcceptedUploadId?u.overrides:{});const ids=new Set(report.matchedIds);for(const e of all('driverEvidence').filter(e=>e.sourceId==='drivers'&&e.automatic&&e.active!==false&&e.uploadId===source.pendingUploadId))ids.add(e.driverId);return {...report,matchedIds:[...ids],add:report.add.filter(d=>!ids.has(d.id)),filename:u.filename};}
  const assetSources=['bancorp','moventum','balance'];
  function syncAssetCoverage(){
@@ -183,6 +183,7 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
      if(d&&action==='ignore')put('drivers',{...d,ignoredAssignment:{vin:d.reportedVin,plate:d.reportedPlate},version:d.version+1,updatedAt:now()});
      if(d&&action==='apply'&&d.ignoredAssignment)put('drivers',{...d,ignoredAssignment:null,version:d.version+1,updatedAt:now()});
      if(target&&action==='apply'){
+      if(d?.archived)fail('Restore this archived driver before assigning a vehicle.');
       if(!d)fail(`Approve adding or matching ${row.driverName} before applying their vehicle assignment.`);
       target={...target,driver:d.name,driverId:d.id,version:target.version+1,updatedAt:now()};put('vehicles',target);audit('Reviewed assignment',target,`${d.name} assigned after CC VIN / plate review.`);counts.changed++;
      }
