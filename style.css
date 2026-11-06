@@ -36,3 +36,5 @@ tr.crash-repair-row>td:first-child{border-left:4px solid #facc15}
 .driver-metrics{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}.driver-cleanup-dialog{width:min(1100px,96vw);max-height:92vh}.driver-cleanup-dialog .insurance-scroll{max-height:45vh}.driver-cleanup-dialog .stack{margin:14px 0}.insurance-review-metrics{padding-left:0;padding-right:0}@media(max-width:720px){.driver-metrics{grid-template-columns:1fr}}
 
 .upload-group{border:2px solid var(--border,#30485a);border-radius:12px;padding:20px;margin:24px 0}.upload-group.gold{border-color:#c6a54a}.upload-group.green{border-color:#36a96c}.upload-group>h2{margin:0 0 16px}.upload-group.gold>h2{color:#e3c56c}.upload-group.green>h2{color:#6bdb9b}.upload-row{display:flex;gap:18px;align-items:stretch}.upload-row>.source-card{flex:1;min-width:0;margin:0}.upload-group.standalone{border:0;padding:0}@media(max-width:900px){.upload-row{flex-direction:column}}
+
+.vehicle-panel-heading{display:flex;align-items:center;gap:28px;flex-wrap:wrap}.vehicle-panel-heading #add-btn{flex-shrink:0}
