@@ -39,3 +39,34 @@ test('insurance cleanup archives selected only and checks versions before any up
 test('marking insurance addition keeps a driver active without inventing insurance coverage',async()=>{const s=seed(),d=(await request(s,'/api/driver-register','POST',{name:'Needs Insurance'})).json;await request(s,'/api/drivers/bulk-review','POST',{ids:[d.id],versions:{[d.id]:d.version},context:'missing-insurance',action:'insurance-add',note:'Request insurer add'});const b=await request(s,'/api/bootstrap');assert.ok(b.json.insuranceComparison.add.some(x=>x.id===d.id));assert.equal(b.json.drivers.find(x=>x.id===d.id).insuranceAction,'Needs insurance addition');assert.ok(!b.json.drivers.find(x=>x.id===d.id).archived);});
 test('later CC upload matches insurance-created driver and clears Not in CC without a duplicate',async()=>{const s=seed();await request(s,'/api/source-upload/jobs','POST',{sourceId:'drivers',filename:'insurance.csv',base64:Buffer.from('Name\n"Testperson, New"\n').toString('base64')});const first=(await request(s,'/api/bootstrap')).json.drivers.find(d=>d.name==='Testperson, New');const csv='Name,File Number,Role,VIN,License Plate #\nNew Testperson,999999,Technician,,\n';const p=await request(s,'/api/source-upload/jobs','POST',{sourceId:'cc',filename:'cc.csv',base64:Buffer.from(csv).toString('base64')});if(p.json.result.status!=='Accepted')await request(s,'/api/source-upload/commit','POST',{uploadId:p.json.id,confirmed:true,decisions:{}});const b=await request(s,'/api/bootstrap');assert.equal(b.json.drivers.filter(d=>/Testperson/.test(d.name)).length,1);assert.equal(b.json.drivers.find(d=>d.id===first.id).inCC,true);});
 test('a new insurer listing resolves an insurance-add follow-up and allows later restore without CC',async()=>{const s=seed(),d=(await request(s,'/api/driver-register','POST',{name:'Followup Employee'})).json;await request(s,'/api/drivers/bulk-review','POST',{ids:[d.id],versions:{[d.id]:d.version},context:'missing-insurance',action:'insurance-add',note:'Requested addition'});await request(s,'/api/source-upload/jobs','POST',{sourceId:'drivers',filename:'insurance.csv',base64:Buffer.from('Name\nFollowup Employee\n').toString('base64')});let b=(await request(s,'/api/bootstrap')).json;let current=b.drivers.find(x=>x.id===d.id);assert.equal(current.insuranceAction,'');assert.ok(b.insuranceComparison.matchedIds.includes(d.id));await request(s,`/api/drivers/${d.id}/archive`,'POST',{version:current.version,archived:true,note:'Temporary cleanup'});current=s.records.drivers.find(x=>x.id===d.id);await request(s,`/api/drivers/${d.id}/archive`,'POST',{version:current.version,archived:false,note:'Restore reviewed employee'});b=(await request(s,'/api/bootstrap')).json;assert.ok(b.drivers.some(x=>x.id===d.id&&x.inCC===false));});
+async function pendingInsurance(s,name='Rollback New Person'){
+ return (await request(s,'/api/source-upload/jobs','POST',{sourceId:'drivers',filename:'bad-insurance.csv',base64:Buffer.from(`Name\n${name}\n${name}\n`).toString('base64')})).json.result;
+}
+test('cancel pending insurance restores prior source, removes only its untouched additions, and cannot rerun',async()=>{
+ const s=seed(),before=(await request(s,'/api/bootstrap')).json,source=structuredClone(s.records.sources.find(x=>x.id==='drivers'));
+ const p=await pendingInsurance(s);assert.equal(p.status,'Pending review');const added=s.records.drivers.find(d=>d.name==='Rollback New Person');assert.ok(added);
+ const r=(await request(s,'/api/source-upload/cancel','POST',{uploadId:p.id,confirmed:true})).json;assert.equal(r.removedDrivers,1);
+ const next=(await request(s,'/api/bootstrap')).json;assert.equal(next.drivers.length,before.drivers.length);assert.equal(next.archivedDrivers.length,before.archivedDrivers.length);assert.deepEqual(next.insuranceComparison.matchedIds,before.insuranceComparison.matchedIds);
+ assert.equal(next.sources.find(x=>x.id==='drivers').lastAcceptedUploadId,source.lastAcceptedUploadId);assert.equal(next.sources.find(x=>x.id==='drivers').pendingUploadId,'');assert.ok(s.records.driverEvidence.filter(e=>e.uploadId===p.id).every(e=>e.active===false));
+ await assert.rejects(()=>request(s,'/api/source-upload/jobs','POST',{uploadId:p.id}),/canceled/);await assert.rejects(()=>request(s,'/api/source-upload/commit','POST',{uploadId:p.id,confirmed:true}),/canceled/);await assert.rejects(()=>request(s,'/api/source-upload/cancel','POST',{uploadId:p.id,confirmed:true}),/no longer/);
+ const again=await pendingInsurance(s);assert.equal((await request(s,'/api/bootstrap')).json.drivers.filter(d=>d.name==='Rollback New Person').length,1);assert.notEqual(again.id,p.id);
+});
+test('cancel insurance preserves later edits and restores existing insurance follow-up fields',async()=>{
+ const s=seed(),original=(await request(s,'/api/driver-register','POST',{name:'Existing Followup Person'})).json;
+ await request(s,'/api/drivers/bulk-review','POST',{ids:[original.id],versions:{[original.id]:original.version},action:'insurance-add',context:'missing-insurance',note:'Add to insurer'});
+ const p=await pendingInsurance(s,'Existing Followup Person');let d=s.records.drivers.find(x=>x.id===original.id);assert.equal(d.insuranceAction,'');
+ d.phone='555-0100';d.version++;
+ await request(s,'/api/source-upload/cancel','POST',{uploadId:p.id,confirmed:true});d=s.records.drivers.find(x=>x.id===original.id);assert.equal(d.insuranceAction,'Needs insurance addition');assert.equal(d.phone,'555-0100');assert.ok(!d.insuranceAdded);
+ const q=await pendingInsurance(s);const added=s.records.drivers.find(x=>x.name==='Rollback New Person'&&!x.voidedByUpload);added.phone='555-0101';added.version++;
+ const r=(await request(s,'/api/source-upload/cancel','POST',{uploadId:q.id,confirmed:true})).json;assert.equal(r.preservedDrivers,1);assert.ok((await request(s,'/api/bootstrap')).json.drivers.some(x=>x.id===added.id));
+});
+test('legacy pending insurance rollback recognizes untouched additions and protects edited people',async()=>{
+ const s=seed(),before=(await request(s,'/api/bootstrap')).json;const p=await pendingInsurance(s);const u=s.records.uploads.find(x=>x.id===p.id);delete u.insuranceUndo;
+ const r=(await request(s,'/api/source-upload/cancel','POST',{uploadId:p.id,confirmed:true})).json;assert.equal(r.removedDrivers,1);assert.equal((await request(s,'/api/bootstrap')).json.drivers.length,before.drivers.length);
+});
+test('cancel requires confirmation and cannot cancel accepted or replace pending upload',async()=>{
+ const s=seed(),p=await pendingInsurance(s);
+ await assert.rejects(()=>request(s,'/api/source-upload/cancel','POST',{uploadId:p.id}),/Confirm/);
+ await assert.rejects(()=>pendingInsurance(s,'Other New Person'),/Cancel or finish/);
+ assert.ok((await request(s,'/api/bootstrap')).json.drivers.some(x=>x.name==='Rollback New Person'));
+});

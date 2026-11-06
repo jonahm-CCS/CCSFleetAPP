@@ -114,6 +114,8 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
   return {insuranceComparison:upload.sourceId==='drivers'?compareInsurance(currentDrivers(),rows,overrides):undefined,rows,warnings:warn,missingVehicleIds:['cc','driverSystem','drivers'].includes(upload.sourceId)?[]:missingVehicleIds,missingDriverIds};
  }
  function saveAutomaticMatches(upload){
+  const beforeDrivers=upload.sourceId==='drivers'?all('drivers'):[];
+  if(upload.sourceId==='drivers'&&!upload.insuranceUndo)upload.insuranceUndo={drivers:legacyUndo(upload)};
   for(const kind of ['evidence','driverEvidence'])for(const e of all(kind).filter(e=>e.uploadId===upload.id&&e.automatic))put(kind,{...e,active:false});
   if(upload.sourceId==='drivers')for(const row of upload.rows.filter(r=>r.kind==='insuredDriver'&&r.status!=='blocked')){
    const hits=all('drivers').filter(d=>driverNameMatches(d,row.fields.name));
@@ -162,12 +164,19 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
    if(v.driverId!==d.id||v.driver!==d.name){for(const other of vehicles().filter(x=>x.id!==v.id&&x.driverId===d.id))put('vehicles',{...other,driver:'',driverId:'',version:other.version+1,updatedAt:now()});const next={...v,driverId:d.id,driver:d.name,version:v.version+1,updatedAt:now()};put('vehicles',next);audit('Automatic driver link',next,'Unique CC VIN / plate matched without an identity conflict.',v);}
    row.status='matched';row.changes=[];row.automatic=true;row.message='Unique driver / vehicle match connected automatically.';
   }
+  if(upload.sourceId==='drivers')for(const d of all('drivers')){
+   const before=beforeDrivers.find(x=>x.id===d.id);
+   if(JSON.stringify(before)===JSON.stringify(d))continue;
+   const prior=upload.insuranceUndo.drivers.find(x=>x.id===d.id);
+   if(!prior)upload.insuranceUndo.drivers.push({id:d.id,before:before||null,after:d});
+   else {if(!prior.before&&JSON.stringify(before)!==JSON.stringify(prior.after))prior.preserve=true;prior.after=d;}
+  }
   upload.fingerprint=fingerprint();put('uploads',upload);
  }
  async function preview({sourceId,filename,base64,overrides={},uploadId,initial=false,extractedText}){
   let upload;
   if(sourceId==='driverSystem')fail('The Driver Register is controlled only by the CC upload. Use CC data export.');
-  if(uploadId){upload=get('uploads',uploadId);if(upload.status==='Accepted')fail('This upload was already accepted. Upload the next report to compare again.',409);}
+  if(uploadId){upload=get('uploads',uploadId);if(upload.status==='Canceled')fail('This upload was canceled. Choose a new report.',409);if(upload.status==='Accepted')fail('This upload was already accepted. Upload the next report to compare again.',409);}
   else{
    if(initial){sourceId='cc';filename='data-export_2026-10-15T12-53-46.csv';const p=resolve(ROOT,'data/initial-cc-export.csv');if(!existsSync(p))fail('The supplied CC export is unavailable. Choose the CSV file.');base64=readFileSync(p).toString('base64');}
    if(!sourceTypes[sourceId]||typeof filename!=='string'||typeof base64!=='string')fail('Choose a source and a file.');const bytes=Buffer.from(base64,'base64');if(!bytes.length||bytes.length>30*1024*1024)fail('Source uploads must be between 1 byte and 30 MB.');
@@ -176,7 +185,8 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
   }
   if(upload.sourceId==='driverSystem')fail('Use CC data export to maintain the Driver Register.');
 
-  const sourceBefore=get('sources',upload.sourceId);if(sourceBefore.lastAcceptedHash===upload.hash&&!upload.warnings.includes('File content is identical to the last accepted upload. Check the report date before treating it as a new monthly report.'))upload.warnings.push('File content is identical to the last accepted upload. Check the report date before treating it as a new monthly report.');
+  const sourceBefore=get('sources',upload.sourceId);
+  if(upload.sourceId==='drivers'&&!uploadId&&sourceBefore.pendingUploadId)fail('Cancel or finish the pending upload before uploading a replacement.',409);if(sourceBefore.lastAcceptedHash===upload.hash&&!upload.warnings.includes('File content is identical to the last accepted upload. Check the report date before treating it as a new monthly report.'))upload.warnings.push('File content is identical to the last accepted upload. Check the report date before treating it as a new monthly report.');
   const plan=buildPlan(upload,overrides);upload={...upload,...plan,overrides,fingerprint:fingerprint(),previewedAt:now()};
   tx(()=>{put('uploads',upload);const source=get('sources',upload.sourceId);put('sources',{...source,lastUploadedAt:upload.uploadedAt,lastFilename:upload.filename,pendingUploadId:upload.id,status:'Pending review'});saveAutomaticMatches(upload);syncAssetCoverage();});
   const noExceptions=upload.rows.length>0&&upload.rows.every(r=>r.automatic||r.kind==='assignment'&&r.status==='matched'&&!r.assignmentConflict)&&!upload.missingVehicleIds.length&&!upload.missingDriverIds.length;
@@ -186,7 +196,7 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
  function publicPreview(u){return {automaticallyAccepted:!!u.automaticallyAccepted,automaticCount:u.rows.filter(r=>r.automatic).length,insuranceComparison:u.sourceId==='drivers'?compareInsurance(currentDrivers(),u.rows,u.overrides):undefined,id:u.id,sourceId:u.sourceId,filename:u.filename,uploadedAt:u.uploadedAt,rows:u.rows,warnings:u.warnings,missingVehicleIds:u.missingVehicleIds,missingDriverIds:u.missingDriverIds,overrides:u.overrides,status:u.status};}
  const newDriver=f=>({id:randomUUID(),...Object.fromEntries(driverKeys.map(k=>[k,String(f[k]||'').trim()])),version:1,createdAt:now(),updatedAt:now()});
  function commit({uploadId,decisions={},confirmed}){
-  if(get('uploads',uploadId).sourceId==='driverSystem')fail('Only CC may maintain the Driver Register.');if(confirmed!==true)fail('Confirm the discrepancy review before saving.');const upload=get('uploads',uploadId);if(upload.status==='Accepted')fail('Upload already accepted.',409);if(upload.fingerprint!==fingerprint())fail('Saved records changed after this preview. Click Recheck before confirming.',409);
+  if(get('uploads',uploadId).sourceId==='driverSystem')fail('Only CC may maintain the Driver Register.');if(confirmed!==true)fail('Confirm the discrepancy review before saving.');const upload=get('uploads',uploadId);if(upload.status==='Canceled')fail('This upload was canceled.',409);if(upload.status==='Accepted')fail('Upload already accepted.',409);if(upload.fingerprint!==fingerprint())fail('Saved records changed after this preview. Click Recheck before confirming.',409);
   if(get('sources',upload.sourceId).pendingUploadId!==upload.id)fail('A newer upload exists for this source. Review the latest upload.',409);
   const counts={driversAdded:0,vehiclesAdded:0,changed:0,evidence:0,kept:0},driverTargets=new Map();
   const acceptedAssignments=new Set();for(const row of upload.rows.filter(r=>r.kind==='assignment'&&decisions[r.key]==='apply')){if(acceptedAssignments.has(row.targetId))fail('Two selected assignments target the same truck. Approve one driver per vehicle.');acceptedAssignments.add(row.targetId);}
@@ -253,5 +263,41 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
    syncAssetCoverage();
   });return counts;
  }
- return {preview,commit,publicPreview,sourceTypes,currentDrivers,insuranceReport,syncAssetCoverage,rememberIgnoredIssues};
+
+ const legacyUndo=upload=>all('drivers').filter(d=>d.createdBySource==='Insurance upload'&&d.createdAt>=upload.uploadedAt&&(upload.rows||[]).some(r=>r.targetId===d.id)).map(d=>({id:d.id,before:null,after:{...d,version:1}}));
+ function cancelPending({uploadId,confirmed}){
+  if(confirmed!==true)fail('Confirm canceling this upload.');
+  const upload=get('uploads',uploadId),source=get('sources',upload.sourceId);
+  if(upload.sourceId!=='drivers')fail('Cancellation is currently available for insured-driver uploads.');
+  if(upload.status!=='Pending review'||source.pendingUploadId!==upload.id)fail('This is no longer the pending upload. Refresh and try again.',409);
+  const previous=all('uploads').find(u=>u.id===source.lastAcceptedUploadId);
+  // Older uploads predate undo journals. Only untouched records created by this
+  // insurance import are eligible for removal; existing people are never inferred.
+  const entries=upload.insuranceUndo?.drivers||legacyUndo(upload);
+  const result={removedDrivers:0,preservedDrivers:0,restoredDrivers:0,previousFilename:previous?.filename||source.name};
+  tx(()=>{
+   for(const entry of entries){
+    const current=all('drivers').find(d=>d.id===entry.id);if(!current)continue;
+    if(!entry.before){
+     const independent=all('driverEvidence').some(e=>e.driverId===current.id&&e.uploadId!==upload.id&&e.active!==false&&['cc','services','drivers'].includes(e.sourceId))||vehicles().some(v=>v.driverId===current.id||v.driver&&driverNameMatches(current,v.driver));
+     if(entry.preserve||independent||JSON.stringify(current)!==JSON.stringify(entry.after)){result.preservedDrivers++;continue;}
+     put('drivers',{...current,voidedByUpload:upload.id,voidedAt:now(),version:current.version+1});result.removedDrivers++;
+    }else{
+     const next={...current};let changed=false;
+     for(const key of new Set([...Object.keys(entry.before),...Object.keys(entry.after)])){
+      if(['id','version','updatedAt'].includes(key))continue;
+      if(JSON.stringify(entry.before[key])===JSON.stringify(entry.after[key])||JSON.stringify(current[key])!==JSON.stringify(entry.after[key]))continue;
+      if(Object.hasOwn(entry.before,key))next[key]=entry.before[key];else delete next[key];changed=true;
+     }
+     if(changed){put('drivers',{...next,version:current.version+1,updatedAt:now()});result.restoredDrivers++;}
+    }
+   }
+   for(const e of all('driverEvidence').filter(e=>e.uploadId===upload.id))put('driverEvidence',{...e,active:false,canceledAt:now()});
+   put('uploads',{...upload,status:'Canceled',canceledAt:now(),cancellation:result});
+   put('sources',{...source,pendingUploadId:'',status:previous?'Loaded':'Awaiting upload',lastFilename:previous?.filename||'',lastUploadedAt:previous?.uploadedAt||'',rowCount:previous?.parsed?.length||previous?.rows?.length||0});
+   audit('Cancel pending insurance upload',null,`${upload.filename}: restored previous source; ${result.removedDrivers} upload-only drivers removed, ${result.preservedDrivers} later-used/edited drivers retained. History preserved.`);
+  });
+  return result;
+ }
+ return {preview,commit,cancelPending,publicPreview,sourceTypes,currentDrivers,insuranceReport,syncAssetCoverage,rememberIgnoredIssues};
 }

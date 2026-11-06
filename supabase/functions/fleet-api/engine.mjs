@@ -37,7 +37,7 @@ function clean(input,old={}){
 }
 
 export async function handleFleet(state,path,method,b){
- const all=k=>structuredClone(state.records[k]||[]);
+ const all=k=>structuredClone((state.records[k]||[]).filter(r=>k!=='drivers'||!r.voidedByUpload));
  const get=(k,id)=>{const r=all(k).find(x=>x.id===id);if(!r)fail('Record not found.',404);return r;};
  const put=(k,v)=>{if(k==='vehicles'&&v.vin&&!v.mergedInto&&all(k).some(x=>x.id!==v.id&&!x.mergedInto&&x.vin===v.vin))fail('That VIN already exists.',409);const rows=state.records[k]??=[];const i=rows.findIndex(x=>x.id===v.id);if(i<0)rows.push(structuredClone(v));else rows[i]=structuredClone(v);return v;};
  const tx=fn=>{const before=structuredClone(state);try{return fn();}catch(e){state.records=before.records;state.audit=before.audit;throw e;}};
@@ -151,6 +151,7 @@ export async function handleFleet(state,path,method,b){
    }
    if(path==='/api/source-upload/jobs'&&method==='POST'){const result=await reconciliation.preview(b);send(res,{id:result.id,status:'complete',result});return;}
    if(path==='/api/source-upload/preview'&&method==='POST'){send(res,await reconciliation.preview(b));return;}
+   if(path==='/api/source-upload/cancel'&&method==='POST'){send(res,reconciliation.cancelPending(b));return;}
    if(path==='/api/source-upload/commit'&&method==='POST'){const result=reconciliation.commit(b);syncPool();result.autoLinked=linkDrivers();send(res,result);return;}
    const up=path.match(/^\/api\/source-upload\/([^/]+)(?:\/(download))?$/);
    if(up&&method==='GET'){const u=get('uploads',up[1]);if(up[2]){res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Disposition':`attachment; filename="${u.filename}"`});res.end(Buffer.from(u.base64,'base64'));}else send(res,reconciliation.publicPreview(u));return;}
