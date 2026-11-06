@@ -70,7 +70,7 @@ export async function handleFleet(state,path,method,b){
     requireThat(typeof b.archived==='boolean','Choose archive or restore.');
     requireThat(typeof b.note==='string'&&b.note.trim().length>=3&&b.note.length<=5000,'Enter a reason (3–5,000 characters).');
     requireThat(!!old.archived!==b.archived,'Driver status changed. Refresh and try again.',409);
-    if(!b.archived){const source=all('sources').find(s=>s.id==='cc');requireThat(all('driverEvidence').some(e=>e.driverId===old.id&&e.sourceId==='cc'&&e.uploadId===source?.lastAcceptedUploadId),'This driver is absent from the current CC roster. Upload the updated CC roster before restoring.',409);}
+    if(!b.archived){const source=all('sources').find(s=>s.id==='cc');requireThat(all('driverEvidence').some(e=>e.driverId===old.id&&e.sourceId==='cc'&&e.uploadId===source?.lastAcceptedUploadId)||old.manualAdded,'This driver is absent from the current CC roster. Upload the updated CC roster before restoring.',409);}
     tx(()=>{put('drivers',{...old,archived:b.archived,archivedAt:b.archived?now():old.archivedAt,archiveNote:b.archived?b.note.trim():old.archiveNote,restoredAt:b.archived?old.restoredAt:now(),statusHistory:[...(old.statusHistory||[]),{archived:b.archived,note:b.note.trim(),at:now()}],version:old.version+1,updatedAt:now()});
      if(b.archived)for(const v of active().filter(v=>v.driverId===old.id||!v.driverId&&driverNameMatches(old,v.driver)))put('vehicles',{...v,driver:'',driverId:'',version:v.version+1,updatedAt:now()});
      audit(b.archived?'Driver archived':'Driver restored',null,old.name+': '+b.note.trim());});send(res,{ok:true});return;
@@ -106,7 +106,17 @@ export async function handleFleet(state,path,method,b){
    const up=path.match(/^\/api\/source-upload\/([^/]+)(?:\/(download))?$/);
    if(up&&method==='GET'){const u=get('uploads',up[1]);if(up[2]){res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Disposition':`attachment; filename="${u.filename}"`});res.end(Buffer.from(u.base64,'base64'));}else send(res,reconciliation.publicPreview(u));return;}
    if(path==='/api/driver-register'&&method==='POST'){
-    fail('The Driver Register is maintained only through the CC upload in Source Comparison.',403);
+    const keys=['name','employeeId','email','phone','role','market'];const fields={};
+    for(const k of keys){requireThat(b[k]===undefined||typeof b[k]==='string','Invalid '+k+'.');fields[k]=String(b[k]||'').trim().replace(/\s+/g,' ');requireThat(fields[k].length<=160,k+' is too long.');}
+    requireThat(fields.name.length>=2,'Enter the driver’s full name.');
+    requireThat(!fields.email||/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fields.email),'Enter a valid email address.');
+    const employee=s=>String(s||'').trim().toUpperCase().replace(/^0+(?=\d)/,'');
+    const duplicate=all('drivers').find(d=>fields.employeeId&&employee(d.employeeId)===employee(fields.employeeId)||fields.email&&String(d.email||'').toLowerCase()===fields.email.toLowerCase()||driverNameMatches(d,fields.name));
+    requireThat(!duplicate,duplicate?.archived?'This driver is archived. Restore their record instead of adding a duplicate.':'This driver already exists. Search by name, employee number, or email.',409);
+    const vehicle=b.vehicleId?get('vehicles',b.vehicleId):null;
+    if(vehicle){version(vehicle,{version:b.vehicleVersion});requireThat(!vehicle.mergedInto&&vehicle.operationalState!=='Disposed','Choose a current vehicle.');requireThat(!vehicle.driver&&!vehicle.driverId,'This vehicle already has a driver. Review its assignment before changing it.',409);}
+    const d={id:randomUUID(),...fields,manualAdded:true,createdBySource:'Manual entry',reportedVin:vehicle?.vin||'',reportedPlate:vehicle?.plate||'',version:1,createdAt:now(),updatedAt:now()};
+    tx(()=>{put('drivers',d);if(vehicle){const next={...vehicle,driver:d.name,driverId:d.id,version:vehicle.version+1,updatedAt:now()};put('vehicles',next);audit('Driver assignment',next,d.name+' assigned when added manually.',vehicle);}audit('Driver added',null,d.name+' added manually; pending CC roster match.');});send(res,d,201);return;
    }
    if(path==='/api/vehicles'&&method==='POST'){const v=clean(b);uniqueUnit(v);tx(()=>{put('vehicles',v);audit('Create',v,'Manual vehicle record created.');});linkDrivers();send(res,get('vehicles',v.id),201);return;}
    const vm=path.match(/^\/api\/vehicles\/([^/]+)(?:\/(verify|merge|driver|section|crashes|confirm-asset))?$/);
