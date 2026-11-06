@@ -186,9 +186,10 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
   if(upload.sourceId==='driverSystem')fail('Use CC data export to maintain the Driver Register.');
 
   const sourceBefore=get('sources',upload.sourceId);
-  if(upload.sourceId==='drivers'&&!uploadId&&sourceBefore.pendingUploadId)fail('Cancel or finish the pending upload before uploading a replacement.',409);if(sourceBefore.lastAcceptedHash===upload.hash&&!upload.warnings.includes('File content is identical to the last accepted upload. Check the report date before treating it as a new monthly report.'))upload.warnings.push('File content is identical to the last accepted upload. Check the report date before treating it as a new monthly report.');
+  if(!uploadId&&sourceBefore.pendingUploadId)fail('Cancel or finish the pending upload before uploading a replacement.',409);if(sourceBefore.lastAcceptedHash===upload.hash&&!upload.warnings.includes('File content is identical to the last accepted upload. Check the report date before treating it as a new monthly report.'))upload.warnings.push('File content is identical to the last accepted upload. Check the report date before treating it as a new monthly report.');
+  const undoKinds=['vehicles','drivers','issues','evidence','driverEvidence','assignmentEvidence'];const undoBefore=Object.fromEntries(undoKinds.map(k=>[k,all(k)]));
   const plan=buildPlan(upload,overrides);upload={...upload,...plan,overrides,fingerprint:fingerprint(),previewedAt:now()};
-  tx(()=>{put('uploads',upload);const source=get('sources',upload.sourceId);put('sources',{...source,lastUploadedAt:upload.uploadedAt,lastFilename:upload.filename,pendingUploadId:upload.id,status:'Pending review'});saveAutomaticMatches(upload);syncAssetCoverage();});
+  tx(()=>{put('uploads',upload);const source=get('sources',upload.sourceId);put('sources',{...source,lastUploadedAt:upload.uploadedAt,lastFilename:upload.filename,pendingUploadId:upload.id,status:'Pending review'});saveAutomaticMatches(upload);syncAssetCoverage();if(upload.sourceId!=='drivers'){upload.sourceUndo??=[];for(const k of undoKinds)for(const after of all(k)){const before=undoBefore[k].find(x=>x.id===after.id);if(JSON.stringify(before)===JSON.stringify(after))continue;const prior=upload.sourceUndo.find(x=>x.kind===k&&x.id===after.id);if(prior)prior.after=after;else upload.sourceUndo.push({kind:k,id:after.id,before:before||null,after});}put('uploads',upload);}});
   const noExceptions=upload.rows.length>0&&upload.rows.every(r=>r.automatic||r.kind==='assignment'&&r.status==='matched'&&!r.assignmentConflict)&&!upload.missingVehicleIds.length&&!upload.missingDriverIds.length;
   if(noExceptions){commit({uploadId:upload.id,confirmed:true});upload=get('uploads',upload.id);upload.automaticallyAccepted=true;put('uploads',upload);audit('Automatic source match',null,`${upload.filename}: all rows matched without changes.`);}
   return publicPreview(upload);
@@ -268,14 +269,21 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
  function cancelPending({uploadId,confirmed}){
   if(confirmed!==true)fail('Confirm canceling this upload.');
   const upload=get('uploads',uploadId),source=get('sources',upload.sourceId);
-  if(upload.sourceId!=='drivers')fail('Cancellation is currently available for insured-driver uploads.');
+  if(upload.sourceId!=='drivers'&&!upload.sourceUndo)fail('This older upload has no restore snapshot. Finish its review before replacing it.',409);
   if(upload.status!=='Pending review'||source.pendingUploadId!==upload.id)fail('This is no longer the pending upload. Refresh and try again.',409);
   const previous=all('uploads').find(u=>u.id===source.lastAcceptedUploadId);
   // Older uploads predate undo journals. Only untouched records created by this
   // insurance import are eligible for removal; existing people are never inferred.
-  const entries=upload.insuranceUndo?.drivers||legacyUndo(upload);
+  const entries=upload.sourceId==='drivers'?(upload.insuranceUndo?.drivers||legacyUndo(upload)):[];
   const result={removedDrivers:0,preservedDrivers:0,restoredDrivers:0,previousFilename:previous?.filename||source.name};
   tx(()=>{
+   for(const entry of upload.sourceUndo||[]){
+    if(!entry.before){if(entry.kind==='issues')put('issues',{...entry.after,status:'Resolved',resolution:'Source upload canceled.'});continue;}
+    const current=all(entry.kind).find(x=>x.id===entry.id);if(!current)continue;const next={...current};let changed=false;
+    for(const key of new Set([...Object.keys(entry.before),...Object.keys(entry.after)])){if(['id','version','updatedAt'].includes(key)||JSON.stringify(entry.before[key])===JSON.stringify(entry.after[key])||JSON.stringify(current[key])!==JSON.stringify(entry.after[key]))continue;if(Object.hasOwn(entry.before,key))next[key]=entry.before[key];else delete next[key];changed=true;}
+    if(changed){if(current.version)next.version=current.version+1;put(entry.kind,next);}
+   }
+   for(const kind of ['evidence','driverEvidence','assignmentEvidence'])for(const e of all(kind).filter(e=>e.uploadId===upload.id))put(kind,{...e,active:false});
    for(const entry of entries){
     const current=all('drivers').find(d=>d.id===entry.id);if(!current)continue;
     if(!entry.before){
@@ -295,7 +303,7 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
    for(const e of all('driverEvidence').filter(e=>e.uploadId===upload.id))put('driverEvidence',{...e,active:false,canceledAt:now()});
    put('uploads',{...upload,status:'Canceled',canceledAt:now(),cancellation:result});
    put('sources',{...source,pendingUploadId:'',status:previous?'Loaded':'Awaiting upload',lastFilename:previous?.filename||'',lastUploadedAt:previous?.uploadedAt||'',rowCount:previous?.parsed?.length||previous?.rows?.length||0});
-   audit('Cancel pending insurance upload',null,`${upload.filename}: restored previous source; ${result.removedDrivers} upload-only drivers removed, ${result.preservedDrivers} later-used/edited drivers retained. History preserved.`);
+   audit('Cancel pending source upload',null,`${upload.filename}: restored previous source; ${result.removedDrivers} upload-only drivers removed, ${result.preservedDrivers} later-used/edited drivers retained. History preserved.`);
   });
   return result;
  }
