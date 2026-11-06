@@ -81,10 +81,13 @@ export async function handleFleet(state,path,method,b){
   }
   if(d){const latest=get('drivers',d.id);put('drivers',{...latest,assignmentOverride:true,version:latest.version+1,updatedAt:now()});}
  }
+ const ccDriverIds=()=>{const source=all('sources').find(s=>s.id==='cc');return new Set(all('driverEvidence').filter(e=>e.sourceId==='cc'&&e.uploadId===source?.lastAcceptedUploadId).map(e=>e.driverId));};
+ const ccIdsForFlags=ccDriverIds();
+ const driverWithFlags=d=>({...d,inCC:ccIdsForFlags.has(d.id),ccStatus:ccIdsForFlags.has(d.id)?'In CC':'Not in CC'});
  const send=(res,data,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(data));};
  const csvCell=v=>'"'+String(v??'').replace(/^[=+@-]/,"'$&").replace(/"/g,'""')+'"';
  async function run(){
-   if(path==='/api/bootstrap'&&method==='GET'){tx(()=>reconciliation.syncAssetCoverage());send(res,{driverLinkChecks:planDriverLinks(active(),reconciliation.currentDrivers()),insuranceComparison:reconciliation.insuranceReport(),token,vehicles:active(),drivers:reconciliation.currentDrivers(),archivedDrivers:all('drivers').filter(d=>d.archived),driverEvidence:all('driverEvidence'),assignmentEvidence:all('assignmentEvidence'),sourceTypes:reconciliation.sourceTypes,uploads:all('uploads').map(u=>({id:u.id,sourceId:u.sourceId,filename:u.filename,uploadedAt:u.uploadedAt,acceptedAt:u.acceptedAt,status:u.status,storageAvailable:!!u.storagePath})),initialCCAvailable:false,sources:all('sources'),evidence:all('evidence'),issues:all('issues'),documents:all('documents').map(({base64,...d})=>d),audit:state.audit.slice(-300).reverse()});return;}
+   if(path==='/api/bootstrap'&&method==='GET'){tx(()=>reconciliation.syncAssetCoverage());send(res,{driverLinkChecks:planDriverLinks(active(),reconciliation.currentDrivers()),insuranceComparison:reconciliation.insuranceReport(),token,vehicles:active(),drivers:reconciliation.currentDrivers().map(driverWithFlags),archivedDrivers:all('drivers').filter(d=>d.archived).map(driverWithFlags),driverEvidence:all('driverEvidence'),assignmentEvidence:all('assignmentEvidence'),sourceTypes:reconciliation.sourceTypes,uploads:all('uploads').map(u=>({id:u.id,sourceId:u.sourceId,filename:u.filename,uploadedAt:u.uploadedAt,acceptedAt:u.acceptedAt,status:u.status,storageAvailable:!!u.storagePath})),initialCCAvailable:false,sources:all('sources'),evidence:all('evidence'),issues:all('issues'),documents:all('documents').map(({base64,...d})=>d),audit:state.audit.slice(-300).reverse()});return;}
    const editDriver=path.match(/^\/api\/drivers\/([^/]+)$/);
    if(editDriver&&method==='PUT'){
     const old=get('drivers',editDriver[1]);version(old,b);const fields={};
@@ -97,13 +100,26 @@ export async function handleFleet(state,path,method,b){
      for(const v of active().filter(v=>v.driverId===old.id))put('vehicles',{...v,driver:next.name,version:v.version+1,updatedAt:now()});
      audit('Driver details edited',null,old.name+': details updated.');});send(res,get('drivers',old.id));return;
    }
+   if(path==='/api/drivers/bulk-review'&&method==='POST'){
+    requireThat(Array.isArray(b.ids)&&b.ids.length>0&&b.ids.length<=10000&&b.ids.every(id=>typeof id==='string'),'Select drivers.');
+    requireThat(['archive','insurance-add','keep'].includes(b.action),'Choose archive, keep active, or mark for insurance addition.');
+    requireThat(['not-cc','missing-insurance'].includes(b.context),'Choose a driver review list.');
+    requireThat(typeof b.note==='string'&&b.note.trim().length>=3&&b.note.length<=5000,'Enter a review note.');
+    const activeIds=new Set(reconciliation.currentDrivers().map(d=>d.id)),ccIds=ccDriverIds(),report=reconciliation.insuranceReport();
+    const missingIds=new Set(report?.add.map(d=>d.id)||[]);const items=[...new Set(b.ids)].map(id=>get('drivers',id));
+    for(const d of items){version(d,{version:b.versions?.[d.id]});requireThat(activeIds.has(d.id)&&!d.archived,'A selected driver is no longer active. Refresh and retry.',409);requireThat(b.context==='not-cc'?!ccIds.has(d.id):missingIds.has(d.id),'A selected driver is no longer in this comparison list. Refresh and retry.',409);}
+    tx(()=>{for(const d of items){const archived=b.action==='archive';put('drivers',{...d,...(archived?{archived:true,archivedAt:now(),archiveNote:b.note.trim(),statusHistory:[...(d.statusHistory||[]),{archived:true,note:b.note.trim(),at:now()}]}:{insuranceAction:b.action==='insurance-add'?'Needs insurance addition':'Keep active; reviewed',insuranceActionAt:now()}),version:d.version+1,updatedAt:now()});
+     if(archived)for(const v of active().filter(v=>v.driverId===d.id||!v.driverId&&driverNameMatches(d,v.driver)))put('vehicles',{...v,driver:'',driverId:'',version:v.version+1,updatedAt:now()});
+     audit(archived?'Driver archived':'Driver insurance review',null,d.name+': '+b.action+'. '+b.note.trim());}});
+    send(res,{ok:true,count:items.length});return;
+   }
    const archiveMatch=path.match(/^\/api\/drivers\/([^/]+)\/archive$/);
    if(archiveMatch&&method==='POST'){
     const old=get('drivers',archiveMatch[1]);version(old,b);
     requireThat(typeof b.archived==='boolean','Choose archive or restore.');
     requireThat(typeof b.note==='string'&&b.note.trim().length>=3&&b.note.length<=5000,'Enter a reason (3–5,000 characters).');
     requireThat(!!old.archived!==b.archived,'Driver status changed. Refresh and try again.',409);
-    if(!b.archived){const source=all('sources').find(s=>s.id==='cc');requireThat(all('driverEvidence').some(e=>e.driverId===old.id&&e.sourceId==='cc'&&e.uploadId===source?.lastAcceptedUploadId)||all('driverEvidence').some(e=>e.driverId===old.id&&e.sourceId==='services'&&e.uploadId===all('sources').find(s=>s.id==='services')?.lastAcceptedUploadId)||old.manualAdded,'This driver is absent from the current CC or Services roster. Upload the updated roster before restoring.',409);}
+
     tx(()=>{put('drivers',{...old,archived:b.archived,archivedAt:b.archived?now():old.archivedAt,archiveNote:b.archived?b.note.trim():old.archiveNote,restoredAt:b.archived?old.restoredAt:now(),statusHistory:[...(old.statusHistory||[]),{archived:b.archived,note:b.note.trim(),at:now()}],version:old.version+1,updatedAt:now()});
      if(b.archived)for(const v of active().filter(v=>v.driverId===old.id||!v.driverId&&driverNameMatches(old,v.driver)))put('vehicles',{...v,driver:'',driverId:'',version:v.version+1,updatedAt:now()});
      audit(b.archived?'Driver archived':'Driver restored',null,old.name+': '+b.note.trim());});send(res,{ok:true});return;

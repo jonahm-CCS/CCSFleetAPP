@@ -17,10 +17,10 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
  for(const [id,c] of Object.entries(sourceTypes))if(!all('sources').some(s=>s.id===id))put('sources',{id,name:c.title,status:'Awaiting upload',rowCount:0,note:id==='cc'?'CC system export is used to check driver identity, role, VIN and plate.':'Source-specific monthly comparison.'});
  const vehicles=()=>all('vehicles').filter(v=>!v.mergedInto);
  const fingerprint=()=>hash({v:all('vehicles').map(v=>[v.id,v.version]),d:all('drivers').map(d=>[d.id,d.version]),ignored:all('ignoredDiscrepancies').map(i=>[i.id,i.active])});
- const findDrivers=f=>all('drivers').filter(d=>f.employeeId&&normalized(d.employeeId)===normalized(f.employeeId)||f.email&&normalized(d.email)===normalized(f.email)||f.name&&normalized(d.name)===normalized(f.name));
- function currentDrivers(){const cc=all('sources').find(s=>s.id==='cc'),services=all('sources').find(s=>s.id==='services');const ids=new Set(all('driverEvidence').filter(e=>e.sourceId==='cc'&&e.uploadId===cc?.lastAcceptedUploadId||e.sourceId==='services'&&e.uploadId===services?.lastAcceptedUploadId).map(e=>e.driverId));return all('drivers').filter(d=>(ids.has(d.id)||d.manualAdded)&&!d.archived);}
+ const findDrivers=f=>all('drivers').filter(d=>f.employeeId&&normalized(d.employeeId)===normalized(f.employeeId)||f.email&&normalized(d.email)===normalized(f.email)||f.name&&driverNameMatches(d,f.name));
+ function currentDrivers(){const cc=all('sources').find(s=>s.id==='cc'),services=all('sources').find(s=>s.id==='services');const ids=new Set(all('driverEvidence').filter(e=>e.sourceId==='cc'&&e.uploadId===cc?.lastAcceptedUploadId||e.sourceId==='services'&&e.uploadId===services?.lastAcceptedUploadId).map(e=>e.driverId));return all('drivers').filter(d=>(ids.has(d.id)||d.manualAdded||d.insuranceAdded)&&!d.archived);}
 
- function insuranceReport(){const source=all('sources').find(s=>s.id==='drivers');if(!source?.lastAcceptedUploadId&&!source?.pendingUploadId)return null;const u=all('uploads').find(u=>u.id===(source.lastAcceptedUploadId||source.pendingUploadId));if(!u)return all('baseline')[0]?.insuranceComparison||null;const report=compareInsurance(currentDrivers(),u.rows,source.lastAcceptedUploadId?u.overrides:{});const ids=new Set(report.matchedIds);for(const e of all('driverEvidence').filter(e=>e.sourceId==='drivers'&&e.automatic&&e.active!==false&&e.uploadId===source.pendingUploadId))ids.add(e.driverId);return {...report,matchedIds:[...ids],add:report.add.filter(d=>!ids.has(d.id)),filename:u.filename};}
+ function insuranceReport(){const source=all('sources').find(s=>s.id==='drivers');if(!source?.lastAcceptedUploadId&&!source?.pendingUploadId)return null;const u=all('uploads').find(u=>u.id===(source.pendingUploadId||source.lastAcceptedUploadId));if(!u)return all('baseline')[0]?.insuranceComparison||null;const report=compareInsurance(currentDrivers(),u.rows,u.overrides||{});const ids=new Set(report.matchedIds);for(const e of all('driverEvidence').filter(e=>e.sourceId==='drivers'&&e.automatic&&e.active!==false&&e.uploadId===source.pendingUploadId))ids.add(e.driverId);return {...report,matchedIds:[...ids],add:report.add.filter(d=>!ids.has(d.id)),filename:u.filename};}
  const assetSources=['bancorp','moventum','balance'];
  function syncAssetCoverage(){
   const sources=all('sources'),refs=all('evidence'),uploads=all('uploads');
@@ -55,10 +55,10 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
    let candidates=[];
    if(input.kind==='driver'||input.kind==='insuredDriver'){
     if(!f.name){row.status='blocked';row.message='Driver name missing.';rows.push(row);continue;}
-    candidates=input.kind==='insuredDriver'?currentDrivers().filter(d=>driverNameMatches(d,f.name)):(upload.sourceId==='services'?ds.filter(d=>driverNameMatches(d,f.name)):findDrivers(f));if(o.targetId){const chosen=(input.kind==='insuredDriver'?currentDrivers():ds).find(d=>d.id===o.targetId);if(!chosen)fail('Selected driver no longer exists.');candidates=[chosen];}
+    candidates=input.kind==='insuredDriver'?ds.filter(d=>driverNameMatches(d,f.name)):(upload.sourceId==='services'?ds.filter(d=>driverNameMatches(d,f.name)):findDrivers(f));if(o.targetId){const chosen=ds.find(d=>d.id===o.targetId);if(!chosen)fail('Selected driver no longer exists.');candidates=[chosen];}
     if(candidates.length>1){row.status='blocked';row.message='Driver identifiers match more than one existing driver. Select the correct record and recheck.';row.candidates=candidates.map(d=>({id:d.id,label:d.name+' · '+(d.employeeId||'No employee number')}));}
     else if(candidates.length===1){const d=candidates[0];row.targetId=d.id;row.targetVersion=d.version;row.changes=input.kind==='insuredDriver'?[]:differences(d,f,driverKeys);row.status=row.changes.length?'changes':'matched';row.message=input.kind==='insuredDriver'?'Name listed in supplied insurance source; this does not approve driving.':'Existing driver matched; no duplicate will be created.';}
-    else{row.status=input.kind==='insuredDriver'?'unmatched':'new';row.message=input.kind==='insuredDriver'?'Not in the current CC roster. Candidate for removal from insurance; no Driver Register record will be created.':'New driver candidate. Approval required to add.';}
+    else{row.status='new';row.message=input.kind==='insuredDriver'?'New insurance-listed person. Added to the Driver Register automatically, with CC membership checked separately.':'New driver candidate. Approval required to add.';}
     const identities=[f.employeeId?'driver-id:'+normalized(f.employeeId):'',f.email?'driver-email:'+normalized(f.email):'',f.name?'driver-name:'+normalized(f.name):''].filter(Boolean);
     if(identities.some(k=>seen.has(k))){row.status='blocked';row.message='Repeated driver name, employee number or email in this upload. Only the first row can be accepted.';}else for(const k of identities)seen.set(k,key);
     rows.push(row);
@@ -110,11 +110,23 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
   const assignmentGroups=new Map();for(const row of rows.filter(r=>r.kind==='assignment'&&r.targetId&&r.status!=='blocked')){if(!assignmentGroups.has(row.targetId))assignmentGroups.set(row.targetId,[]);assignmentGroups.get(row.targetId).push(row);}for(const group of assignmentGroups.values())if(group.length>1)for(const row of group){row.assignmentConflict=true;row.message+=' Multiple CC drivers report this truck. Approve at most one assignment.';}
   const previousSource=get('sources',upload.sourceId);const activeEvidence=all('evidence').filter(e=>e.sourceId===upload.sourceId&&(!previousSource.lastAcceptedUploadId||e.uploadId===previousSource.lastAcceptedUploadId)),incomingVins=new Set(upload.parsed.map(r=>r.fields.vin).filter(Boolean));
   const missingVehicleIds=[...new Set(activeEvidence.filter(e=>e.match==='Exact VIN'&&!incomingVins.has(e.reportedVin||e.fields?.vin)).map(e=>e.vehicleId))].filter(id=>vs.some(v=>v.id===id));
-  const incomingDrivers=new Set(rows.filter(r=>r.kind==='driver'&&r.targetId).map(r=>r.targetId));const missingDriverIds=['cc','services','driverSystem'].includes(upload.sourceId)?currentDrivers().filter(d=>(upload.sourceId==='services'?d.isServiceDriver:!d.isServiceDriver)&&!incomingDrivers.has(d.id)).map(d=>d.id):[];
+  const incomingDrivers=new Set(rows.filter(r=>r.kind==='driver'&&r.targetId).map(r=>r.targetId));const missingDriverIds=['cc','services','driverSystem'].includes(upload.sourceId)?currentDrivers().filter(d=>(upload.sourceId==='services'?d.isServiceDriver:!d.isServiceDriver&&all('driverEvidence').some(e=>e.driverId===d.id&&e.sourceId==='cc'&&e.uploadId===get('sources','cc').lastAcceptedUploadId))&&!incomingDrivers.has(d.id)).map(d=>d.id):[];
   return {insuranceComparison:upload.sourceId==='drivers'?compareInsurance(currentDrivers(),rows,overrides):undefined,rows,warnings:warn,missingVehicleIds:['cc','driverSystem','drivers'].includes(upload.sourceId)?[]:missingVehicleIds,missingDriverIds};
  }
  function saveAutomaticMatches(upload){
   for(const kind of ['evidence','driverEvidence'])for(const e of all(kind).filter(e=>e.uploadId===upload.id&&e.automatic))put(kind,{...e,active:false});
+  if(upload.sourceId==='drivers')for(const row of upload.rows.filter(r=>r.kind==='insuredDriver'&&r.status!=='blocked')){
+   const hits=all('drivers').filter(d=>driverNameMatches(d,row.fields.name));
+   if(!row.targetId){
+    if(hits.length>1){row.status='blocked';row.message='Multiple possible driver identities. Choose the correct record before adding.';continue;}
+    const d=hits[0]||{...newDriver(row.fields),insuranceAdded:true,createdBySource:'Insurance upload'};
+    if(!hits.length){put('drivers',d);audit('Insurance driver added',null,d.name+' added from '+upload.filename+'. CC membership is checked separately.');}
+    row.targetId=d.id;row.targetVersion=d.version;
+   }
+   const old=get('drivers',row.targetId);
+   if(!old.archived&&!old.insuranceAdded)put('drivers',{...old,insuranceAdded:true,version:old.version+1,updatedAt:now()});
+   row.status='matched';row.changes=[];row.message=old.archived?'Insurance-listed person is archived. Kept archived until explicitly restored.':'Listed by insurer. Driver Register record saved; CC membership is a separate flag.';
+  }
   // Approved source priorities: existing unique records update without exception clicks.
   for(const row of upload.rows){
    if(row.status!=='changes'||!row.targetId||row.manuallyMatched)continue;
@@ -163,7 +175,7 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
    upload={id:randomUUID(),sourceId,filename:filename.replace(/[^\w. ()-]/g,'_').slice(0,180),base64,hash:fileHash(bytes),parsed:parsed.rows,warnings:parsed.warnings,extractedText:parsed.extractedText||'',uploadedAt:now(),status:'Pending review'};
   }
   if(upload.sourceId==='driverSystem')fail('Use CC data export to maintain the Driver Register.');
-  if(upload.sourceId==='drivers'&&!get('sources','cc').lastAcceptedUploadId)fail('Accept a CC roster before comparing insurance drivers.');
+
   const sourceBefore=get('sources',upload.sourceId);if(sourceBefore.lastAcceptedHash===upload.hash&&!upload.warnings.includes('File content is identical to the last accepted upload. Check the report date before treating it as a new monthly report.'))upload.warnings.push('File content is identical to the last accepted upload. Check the report date before treating it as a new monthly report.');
   const plan=buildPlan(upload,overrides);upload={...upload,...plan,overrides,fingerprint:fingerprint(),previewedAt:now()};
   tx(()=>{put('uploads',upload);const source=get('sources',upload.sourceId);put('sources',{...source,lastUploadedAt:upload.uploadedAt,lastFilename:upload.filename,pendingUploadId:upload.id,status:'Pending review'});saveAutomaticMatches(upload);syncAssetCoverage();});
