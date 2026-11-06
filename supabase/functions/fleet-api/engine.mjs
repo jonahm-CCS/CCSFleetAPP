@@ -60,10 +60,38 @@ export async function handleFleet(state,path,method,b){
  const version=(old,b)=>requireThat(old.version===b.version,'Record changed in another window. Close and reopen it before saving.',409);
  const active=()=>all('vehicles').filter(v=>!v.mergedInto);
  const uniqueUnit=v=>requireThat(!v.unitNumber||!active().some(x=>x.id!==v.id&&String(x.unitNumber).toUpperCase()===v.unitNumber.toUpperCase()),'That CCS number already exists. Review the duplicate.',409);
+ function assignDriver(vehicleId,driverId,b){
+  const target=vehicleId?get('vehicles',vehicleId):null,d=driverId?get('drivers',driverId):null;
+  requireThat(!d||!d.archived,'Restore the archived driver before assigning them.');
+  requireThat(!target||!target.mergedInto&&target.operationalState!=='Disposed','Choose a current vehicle.');
+  const affected=active().filter(v=>target&&v.id===target.id||d&&(v.driverId===d.id||!v.driverId&&driverNameMatches(d,v.driver)));
+  const replacing=target&&(target.driverId&&target.driverId!==driverId||target.driver&&!d||target.driver&&d&&!driverNameMatches(d,target.driver));
+  const moving=d&&affected.some(v=>v.id!==vehicleId);
+  requireThat(!(replacing||moving)||b.confirmAssignment===true,'Confirm replacing or moving the current driver assignment.',409);
+  for(const v of affected)if(v.id!==vehicleId)version(v,{version:b.assignmentVersions?.[v.id]});
+  for(const v of affected){
+   const next={...v,driver:v.id===vehicleId&&d?d.name:'',driverId:v.id===vehicleId&&d?d.id:'',version:v.version+1,updatedAt:now()};
+   if(v.driverId&&v.driverId!==driverId){const prior=get('drivers',v.driverId);put('drivers',{...prior,assignmentOverride:true,version:prior.version+1,updatedAt:now()});}
+   put('vehicles',next);audit('Driver reassignment',next,'Assignment changed manually; previous assignment retained in history.',v);
+  }
+  if(d){const latest=get('drivers',d.id);put('drivers',{...latest,assignmentOverride:true,version:latest.version+1,updatedAt:now()});}
+ }
  const send=(res,data,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(data));};
  const csvCell=v=>'"'+String(v??'').replace(/^[=+@-]/,"'$&").replace(/"/g,'""')+'"';
  async function run(){
    if(path==='/api/bootstrap'&&method==='GET'){tx(()=>reconciliation.syncAssetCoverage());send(res,{driverLinkChecks:planDriverLinks(active(),reconciliation.currentDrivers()),insuranceComparison:reconciliation.insuranceReport(),token,vehicles:active(),drivers:reconciliation.currentDrivers(),archivedDrivers:all('drivers').filter(d=>d.archived),driverEvidence:all('driverEvidence'),assignmentEvidence:all('assignmentEvidence'),sourceTypes:reconciliation.sourceTypes,uploads:all('uploads').map(u=>({id:u.id,sourceId:u.sourceId,filename:u.filename,uploadedAt:u.uploadedAt,acceptedAt:u.acceptedAt,status:u.status,storageAvailable:!!u.storagePath})),initialCCAvailable:false,sources:all('sources'),evidence:all('evidence'),issues:all('issues'),documents:all('documents').map(({base64,...d})=>d),audit:state.audit.slice(-300).reverse()});return;}
+   const editDriver=path.match(/^\/api\/drivers\/([^/]+)$/);
+   if(editDriver&&method==='PUT'){
+    const old=get('drivers',editDriver[1]);version(old,b);const fields={};
+    for(const k of ['name','employeeId','role','market','email','phone']){requireThat(typeof b[k]==='string'&&b[k].length<=160,'Invalid '+k+'.');fields[k]=b[k].trim().replace(/\s+/g,' ');}
+    requireThat(fields.name.length>=2,'Enter the driver’s full name.');requireThat(!fields.email||/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fields.email),'Enter a valid email.');
+    const emp=s=>String(s||'').toUpperCase().replace(/^0+(?=\d)/,'');
+    requireThat(!all('drivers').some(d=>d.id!==old.id&&(fields.employeeId&&emp(d.employeeId)===emp(fields.employeeId)||fields.email&&String(d.email||'').toLowerCase()===fields.email.toLowerCase()||driverNameMatches(d,fields.name))),'Another driver has that name, employee number, or email.',409);
+    tx(()=>{const next={...old,...fields,version:old.version+1,updatedAt:now()};put('drivers',next);
+     if(b.vehicleId!==undefined){const target=b.vehicleId?get('vehicles',b.vehicleId):null;if(target)requireThat(b.vehicleVersion===target.version||target.driverId===old.id&&b.vehicleVersion===target.version-1,'Vehicle changed. Refresh and retry.',409);assignDriver(b.vehicleId||'',old.id,b);}
+     for(const v of active().filter(v=>v.driverId===old.id))put('vehicles',{...v,driver:next.name,version:v.version+1,updatedAt:now()});
+     audit('Driver details edited',null,old.name+': details updated.');});send(res,get('drivers',old.id));return;
+   }
    const archiveMatch=path.match(/^\/api\/drivers\/([^/]+)\/archive$/);
    if(archiveMatch&&method==='POST'){
     const old=get('drivers',archiveMatch[1]);version(old,b);
@@ -121,7 +149,7 @@ export async function handleFleet(state,path,method,b){
    if(path==='/api/vehicles'&&method==='POST'){const v=clean(b);uniqueUnit(v);tx(()=>{put('vehicles',v);audit('Create',v,'Manual vehicle record created.');});linkDrivers();send(res,get('vehicles',v.id),201);return;}
    const vm=path.match(/^\/api\/vehicles\/([^/]+)(?:\/(verify|merge|driver|section|crashes|confirm-asset))?$/);
    if(vm){const old=get('vehicles',vm[1]);requireThat(!old.mergedInto,'This record was merged.',409);version(old,b||{});
-    if(method==='PUT'&&!vm[2]){const v=clean(b,old);if(String(v.unitNumber)!==String(old.unitNumber))uniqueUnit(v);tx(()=>{put('vehicles',v);audit('Edit',v,b.note||'Master record updated; verification reset.',old);});linkDrivers();send(res,get('vehicles',v.id));return;}
+    if(method==='PUT'&&!vm[2]){const v=clean(b,old);if(String(v.unitNumber)!==String(old.unitNumber))uniqueUnit(v);tx(()=>{put('vehicles',v);if(b.assignmentDriverId!==undefined)assignDriver(v.id,b.assignmentDriverId,b);audit('Edit',v,b.note||'Master record updated; verification reset.',old);});linkDrivers();send(res,get('vehicles',v.id));return;}
     if(method==='POST'&&vm[2]==='confirm-asset'){
      const source=all('sources').find(s=>s.id==='balance');
      const refs=all('evidence').filter(e=>e.active!==false&&e.vehicleId===old.id&&e.sourceId==='balance'&&(!source?.lastAcceptedUploadId||e.uploadId===source.lastAcceptedUploadId||e.automatic&&e.uploadId===source.pendingUploadId));
@@ -138,10 +166,8 @@ export async function handleFleet(state,path,method,b){
      tx(()=>{put('vehicles',v);audit('CCS section',v,b.section?`Section set to ${b.section}.`:'CCS section cleared.',old);});send(res,v);return;
     }
     if(method==='POST'&&vm[2]==='driver'){
-     requireThat(typeof b.driver==='string'&&b.driver.trim().length<=120,'Driver name must be 120 characters or fewer.');
-     let driver=b.driver.trim(),driverId='';if(b.driverId){const d=get('drivers',b.driverId);requireThat(!d.archived,'Archived drivers cannot be assigned.');driver=d.name;driverId=d.id;}else if(driver){const hits=all('drivers').filter(d=>d.name.trim().toUpperCase()===driver.toUpperCase());requireThat(hits.length<=1,'Multiple registered drivers share that name. Select the correct driver.');if(hits.length){requireThat(!hits[0].archived,'Archived drivers cannot be assigned.');driverId=hits[0].id;}}requireThat(!driver||driver.length>=2,'Enter the driver’s first and last name.');
-     const v={...old,driver,driverId,version:old.version+1,updatedAt:now()};
-     tx(()=>{put('vehicles',v);audit('Driver assignment',v,driver?`Driver set to ${driver}.`:'Driver assignment removed.',old);});send(res,v);return;
+     requireThat(typeof b.driverId==='string','Select a registered driver or remove the assignment.');
+     tx(()=>assignDriver(old.id,b.driverId,b));send(res,get('vehicles',old.id));return;
     }
     if(method==='POST'&&vm[2]==='verify'){
      requireThat(typeof b.reviewer==='string'&&b.reviewer.trim().length>=2,'Enter reviewer name.');requireThat(typeof b.note==='string'&&b.note.trim().length>=10,'Describe the verification evidence (10+ characters).');
