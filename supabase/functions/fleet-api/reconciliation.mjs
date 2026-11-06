@@ -124,7 +124,7 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
     row.targetId=d.id;row.targetVersion=d.version;
    }
    const old=get('drivers',row.targetId);
-   if(!old.archived&&!old.insuranceAdded)put('drivers',{...old,insuranceAdded:true,version:old.version+1,updatedAt:now()});
+   if(!old.archived&&(!old.insuranceAdded||old.insuranceAction))put('drivers',{...old,insuranceAdded:true,insuranceAction:'',...(old.insuranceAction?{insuranceActionResolvedAt:now()}:{}),version:old.version+1,updatedAt:now()});
    row.status='matched';row.changes=[];row.message=old.archived?'Insurance-listed person is archived. Kept archived until explicitly restored.':'Listed by insurer. Driver Register record saved; CC membership is a separate flag.';
   }
   // Approved source priorities: existing unique records update without exception clicks.
