@@ -12,6 +12,7 @@ const text=x=>typeof x==='string'?x:x?String(x._text??x._cdata??''):'';
 const doc=s=>xml.xml2js(s,{compact:true});
 const norm=s=>String(s??'').trim();
 export const sourceTypes={
+ services:{title:'Services vehicles & eligible drivers',accept:'.xlsx',label:'Upload Service Truck Log (.xlsx)'},
  samsara:{title:'Samsara vehicle equipment',accept:'.csv',label:'Upload Samsara CSV'},
  fleet:{title:'Fleet Sheet',accept:'.xlsx',label:'Upload Excel (.xlsx)'},
  bancorp:{title:'Bancorp portfolio',accept:'.xlsx',label:'Upload Excel (.xlsx)'},
@@ -45,6 +46,16 @@ function ccRows(rows){const headers=rows[0]?.map(norm)||[];for(const h of ['Name
 export async function parseSource(sourceId,filename,buffer,extractedText){
  if(sourceId==='emc'){try{const cached=JSON.parse(readFileSync(resolve(ROOT,'data/emc-original-cache.json')));if(fileHash(buffer)===cached.hash)return {rows:cached.rows,warnings:['Byte-identical to the originally supplied EMC document. Retained transcription reused; report is dated September 25, 2026. Re-uploading an unchanged file does not make its report date current.']};}catch{}}
  const config=sourceTypes[sourceId];if(!config)bad('Unknown source.');const ext=extname(filename).toLowerCase();if(!config.accept.split(',').includes(ext))bad(`Use ${config.accept} for ${config.title}.`);
+ if(sourceId==='services'){
+  const sheets=await readXLSX(buffer),vehicleSheet=sheets[0],driverSheet=sheets.find(s=>s.name.trim().toLowerCase()==='eligible drivers');
+  if(!vehicleSheet||!driverSheet)bad('Use the Service Truck Log workbook with vehicles in Tab 1 and an Eligible Drivers tab.');
+  const trucks=mappedRows(vehicleSheet,['Vehicle #','VIN #','License Plate #']),people=mappedRows(driverSheet,['Driver Name','Market','Position']);
+  const rows=[];
+  for(const {raw,row} of trucks){if(!raw['VIN #'])continue;rows.push(vehicleRow(raw,{vin:raw['VIN #'],serviceVehicleNumber:raw['Vehicle #'],location:raw.Location,make:raw.Make,plate:raw['License Plate #'],section:'Services'},`${vehicleSheet.name} row ${row}`));}
+  for(const {raw,row} of people){if(!raw['Driver Name'])continue;rows.push({kind:'driver',fields:{name:raw['Driver Name'],market:raw.Market,role:raw.Position},raw,locator:`${driverSheet.name} row ${row}`});}
+  if(!rows.some(r=>r.kind==='vehicle')||!rows.some(r=>r.kind==='driver'))bad('The workbook must contain vehicle and eligible-driver records.');
+  return {rows,warnings:['Services is a shared vehicle pool. Source vehicle numbers are stored separately from the CCS number. Drivers are not permanently assigned to individual Services vehicles. Insurance, lease/accounting, Samsara, duplicate, archive and discrepancy checks still apply.']};
+ }
  if(sourceId==='driverSystem'){
   const rows=readCSV(buffer.toString('utf8')),headers=rows.shift()||[],normalize=s=>String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');
   const aliases={name:['name','drivername','fullname'],employeeId:['employeenumber','employeeid','filenumber','employee'],email:['email','emailaddress'],phone:['phone','phonenumber'],market:['market','region'],city:['city'],state:['state'],systemRole:['role','jobtitle','position'],canDrive:['candrive'],onboardingCompleted:['onboardingcompleted']};

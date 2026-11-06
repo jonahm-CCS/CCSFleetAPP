@@ -2,8 +2,9 @@ const vin=s=>String(s||'').trim().toUpperCase().replace(/\s/g,'');
 const plate=s=>String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
 const name=s=>String(s||'').trim().replace(/\s+/g,' ').toUpperCase();
 export function planDriverLinks(vehicles,drivers){
- const vs=vehicles.filter(v=>!v.mergedInto&&v.operationalState!=='Disposed');
+ const vs=vehicles.filter(v=>!v.mergedInto&&v.operationalState!=='Disposed'&&v.section!=='Services'&&!v.isServiceVehicle);
  const plans=drivers.map(d=>{
+  if(d.isServiceDriver)return {driverId:d.id,vehicleId:'',reason:'',ignored:true};
   if(d.assignmentOverride)return {driverId:d.id,vehicleId:'',reason:'',ignored:true};
   const dv=vin(d.reportedVin),dp=plate(d.reportedPlate),result={driverId:d.id,vehicleId:'',reason:''};
   if(d.ignoredAssignment&&vin(d.ignoredAssignment.vin)===dv&&plate(d.ignoredAssignment.plate)===dp)return {...result,ignored:true};

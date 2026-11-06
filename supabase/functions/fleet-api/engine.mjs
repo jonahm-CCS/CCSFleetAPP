@@ -1,3 +1,4 @@
+import {syncServices} from './services.mjs';
 import {Buffer} from 'node:buffer';
 import {randomUUID,createHash} from 'node:crypto';
 import {extname} from 'node:path';
@@ -6,7 +7,7 @@ import {driverNameMatches} from './insurance-drivers.mjs';
 import {connectDrivers,planDriverLinks} from './driver-links.mjs';
 import {setupReconciliation} from './reconciliation.mjs';
 const ROOT='/tmp';
-export const FIELDS=['section','unitNumber','vin','year','make','model','plate','plateState','location','region','ownership','registrationExpiry','insuranceExpiry','odometer','odometerDate','fuelProvider','fuelCard','tollTag','condition','operationalState','lastOilChange','lastOilMileage','pmDueDate','pmDueMiles','tireCondition','mechanicalNotes','notes'];
+export const FIELDS=['section','serviceVehicleNumber','unitNumber','vin','year','make','model','plate','plateState','location','region','ownership','registrationExpiry','insuranceExpiry','odometer','odometerDate','fuelProvider','fuelCard','tollTag','condition','operationalState','lastOilChange','lastOilMileage','pmDueDate','pmDueMiles','tireCondition','mechanicalNotes','notes'];
 export const CHECKS=['identity','location','ownership','registration','insurance','condition','maintenance','equipment'];
 const now=()=>new Date().toISOString();
 const fail=(message,status=400)=>{throw Object.assign(new Error(message),{status});};
@@ -54,6 +55,7 @@ export async function handleFleet(state,path,method,b){
   audit('Section upgrade',null,`${filled} CCS sections populated from explicit Fleet Sheet Service Level labels; other records left blank.`);
  });
  const reconciliation=setupReconciliation({all,get,put,tx,audit,clean,ROOT});
+ const syncPool=()=>syncServices({all,put,audit});syncPool();
  const linkDrivers=()=>connectDrivers({all:k=>k==='drivers'?reconciliation.currentDrivers():all(k),put,tx,audit});
 
  const token='public-shared';
@@ -62,6 +64,7 @@ export async function handleFleet(state,path,method,b){
  const uniqueUnit=v=>requireThat(!v.unitNumber||!active().some(x=>x.id!==v.id&&String(x.unitNumber).toUpperCase()===v.unitNumber.toUpperCase()),'That CCS number already exists. Review the duplicate.',409);
  function assignDriver(vehicleId,driverId,b){
   const target=vehicleId?get('vehicles',vehicleId):null,d=driverId?get('drivers',driverId):null;
+  requireThat(!d?.isServiceDriver&&(!target||target.section!=='Services'&&!target.isServiceVehicle),'Services vehicles and drivers use pool placeholders, not permanent assignments.');
   requireThat(!d||!d.archived,'Restore the archived driver before assigning them.');
   requireThat(!target||!target.mergedInto&&target.operationalState!=='Disposed','Choose a current vehicle.');
   const affected=active().filter(v=>target&&v.id===target.id||d&&(v.driverId===d.id||!v.driverId&&driverNameMatches(d,v.driver)));
@@ -98,7 +101,7 @@ export async function handleFleet(state,path,method,b){
     requireThat(typeof b.archived==='boolean','Choose archive or restore.');
     requireThat(typeof b.note==='string'&&b.note.trim().length>=3&&b.note.length<=5000,'Enter a reason (3–5,000 characters).');
     requireThat(!!old.archived!==b.archived,'Driver status changed. Refresh and try again.',409);
-    if(!b.archived){const source=all('sources').find(s=>s.id==='cc');requireThat(all('driverEvidence').some(e=>e.driverId===old.id&&e.sourceId==='cc'&&e.uploadId===source?.lastAcceptedUploadId)||old.manualAdded,'This driver is absent from the current CC roster. Upload the updated CC roster before restoring.',409);}
+    if(!b.archived){const source=all('sources').find(s=>s.id==='cc');requireThat(all('driverEvidence').some(e=>e.driverId===old.id&&e.sourceId==='cc'&&e.uploadId===source?.lastAcceptedUploadId)||all('driverEvidence').some(e=>e.driverId===old.id&&e.sourceId==='services'&&e.uploadId===all('sources').find(s=>s.id==='services')?.lastAcceptedUploadId)||old.manualAdded,'This driver is absent from the current CC or Services roster. Upload the updated roster before restoring.',409);}
     tx(()=>{put('drivers',{...old,archived:b.archived,archivedAt:b.archived?now():old.archivedAt,archiveNote:b.archived?b.note.trim():old.archiveNote,restoredAt:b.archived?old.restoredAt:now(),statusHistory:[...(old.statusHistory||[]),{archived:b.archived,note:b.note.trim(),at:now()}],version:old.version+1,updatedAt:now()});
      if(b.archived)for(const v of active().filter(v=>v.driverId===old.id||!v.driverId&&driverNameMatches(old,v.driver)))put('vehicles',{...v,driver:'',driverId:'',version:v.version+1,updatedAt:now()});
      audit(b.archived?'Driver archived':'Driver restored',null,old.name+': '+b.note.trim());});send(res,{ok:true});return;
@@ -130,7 +133,7 @@ export async function handleFleet(state,path,method,b){
    }
    if(path==='/api/source-upload/jobs'&&method==='POST'){const result=await reconciliation.preview(b);send(res,{id:result.id,status:'complete',result});return;}
    if(path==='/api/source-upload/preview'&&method==='POST'){send(res,await reconciliation.preview(b));return;}
-   if(path==='/api/source-upload/commit'&&method==='POST'){const result=reconciliation.commit(b);result.autoLinked=linkDrivers();send(res,result);return;}
+   if(path==='/api/source-upload/commit'&&method==='POST'){const result=reconciliation.commit(b);syncPool();result.autoLinked=linkDrivers();send(res,result);return;}
    const up=path.match(/^\/api\/source-upload\/([^/]+)(?:\/(download))?$/);
    if(up&&method==='GET'){const u=get('uploads',up[1]);if(up[2]){res.writeHead(200,{'Content-Type':'application/octet-stream','Content-Disposition':`attachment; filename="${u.filename}"`});res.end(Buffer.from(u.base64,'base64'));}else send(res,reconciliation.publicPreview(u));return;}
    if(path==='/api/driver-register'&&method==='POST'){
@@ -143,13 +146,14 @@ export async function handleFleet(state,path,method,b){
     requireThat(!duplicate,duplicate?.archived?'This driver is archived. Restore their record instead of adding a duplicate.':'This driver already exists. Search by name, employee number, or email.',409);
     const vehicle=b.vehicleId?get('vehicles',b.vehicleId):null;
     if(vehicle){version(vehicle,{version:b.vehicleVersion});requireThat(!vehicle.mergedInto&&vehicle.operationalState!=='Disposed','Choose a current vehicle.');requireThat(!vehicle.driver&&!vehicle.driverId,'This vehicle already has a driver. Review its assignment before changing it.',409);}
+    if(vehicle)requireThat(vehicle.section!=='Services'&&!vehicle.isServiceVehicle,'Services vehicles use a shared driver pool.');
     const d={id:randomUUID(),...fields,manualAdded:true,createdBySource:'Manual entry',reportedVin:vehicle?.vin||'',reportedPlate:vehicle?.plate||'',version:1,createdAt:now(),updatedAt:now()};
     tx(()=>{put('drivers',d);if(vehicle){const next={...vehicle,driver:d.name,driverId:d.id,version:vehicle.version+1,updatedAt:now()};put('vehicles',next);audit('Driver assignment',next,d.name+' assigned when added manually.',vehicle);}audit('Driver added',null,d.name+' added manually; pending CC roster match.');});send(res,d,201);return;
    }
    if(path==='/api/vehicles'&&method==='POST'){const v=clean(b);uniqueUnit(v);tx(()=>{put('vehicles',v);audit('Create',v,'Manual vehicle record created.');});linkDrivers();send(res,get('vehicles',v.id),201);return;}
    const vm=path.match(/^\/api\/vehicles\/([^/]+)(?:\/(verify|merge|driver|section|crashes|confirm-asset))?$/);
    if(vm){const old=get('vehicles',vm[1]);requireThat(!old.mergedInto,'This record was merged.',409);version(old,b||{});
-    if(method==='PUT'&&!vm[2]){const v=clean(b,old);if(String(v.unitNumber)!==String(old.unitNumber))uniqueUnit(v);tx(()=>{put('vehicles',v);if(b.assignmentDriverId!==undefined)assignDriver(v.id,b.assignmentDriverId,b);audit('Edit',v,b.note||'Master record updated; verification reset.',old);});linkDrivers();send(res,get('vehicles',v.id));return;}
+    if(method==='PUT'&&!vm[2]){const v=clean(b,old);if(String(v.unitNumber)!==String(old.unitNumber))uniqueUnit(v);tx(()=>{put('vehicles',v);syncPool();if(b.assignmentDriverId!==undefined)assignDriver(v.id,b.assignmentDriverId,b);audit('Edit',v,b.note||'Master record updated; verification reset.',old);});linkDrivers();send(res,get('vehicles',v.id));return;}
     if(method==='POST'&&vm[2]==='confirm-asset'){
      const source=all('sources').find(s=>s.id==='balance');
      const refs=all('evidence').filter(e=>e.active!==false&&e.vehicleId===old.id&&e.sourceId==='balance'&&(!source?.lastAcceptedUploadId||e.uploadId===source.lastAcceptedUploadId||e.automatic&&e.uploadId===source.pendingUploadId));

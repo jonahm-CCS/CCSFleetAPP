@@ -17,7 +17,8 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
  const vehicles=()=>all('vehicles').filter(v=>!v.mergedInto);
  const fingerprint=()=>hash({v:all('vehicles').map(v=>[v.id,v.version]),d:all('drivers').map(d=>[d.id,d.version]),ignored:all('ignoredDiscrepancies').map(i=>[i.id,i.active])});
  const findDrivers=f=>all('drivers').filter(d=>f.employeeId&&normalized(d.employeeId)===normalized(f.employeeId)||f.email&&normalized(d.email)===normalized(f.email)||f.name&&normalized(d.name)===normalized(f.name));
- function currentDrivers(){const source=all('sources').find(s=>s.id==='cc');if(!source?.lastAcceptedUploadId)return all('drivers').filter(d=>d.manualAdded&&!d.archived);const ids=new Set(all('driverEvidence').filter(e=>e.sourceId==='cc'&&e.uploadId===source.lastAcceptedUploadId).map(e=>e.driverId));return all('drivers').filter(d=>(ids.has(d.id)||d.manualAdded)&&!d.archived);}
+ function currentDrivers(){const cc=all('sources').find(s=>s.id==='cc'),services=all('sources').find(s=>s.id==='services');const ids=new Set(all('driverEvidence').filter(e=>e.sourceId==='cc'&&e.uploadId===cc?.lastAcceptedUploadId||e.sourceId==='services'&&e.uploadId===services?.lastAcceptedUploadId).map(e=>e.driverId));return all('drivers').filter(d=>(ids.has(d.id)||d.manualAdded)&&!d.archived);}
+
  function insuranceReport(){const source=all('sources').find(s=>s.id==='drivers');if(!source?.lastAcceptedUploadId&&!source?.pendingUploadId)return null;const u=all('uploads').find(u=>u.id===(source.lastAcceptedUploadId||source.pendingUploadId));if(!u)return all('baseline')[0]?.insuranceComparison||null;const report=compareInsurance(currentDrivers(),u.rows,source.lastAcceptedUploadId?u.overrides:{});const ids=new Set(report.matchedIds);for(const e of all('driverEvidence').filter(e=>e.sourceId==='drivers'&&e.automatic&&e.active!==false&&e.uploadId===source.pendingUploadId))ids.add(e.driverId);return {...report,matchedIds:[...ids],add:report.add.filter(d=>!ids.has(d.id)),filename:u.filename};}
  const assetSources=['bancorp','moventum','balance'];
  function syncAssetCoverage(){
@@ -53,7 +54,7 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
    let candidates=[];
    if(input.kind==='driver'||input.kind==='insuredDriver'){
     if(!f.name){row.status='blocked';row.message='Driver name missing.';rows.push(row);continue;}
-    candidates=input.kind==='insuredDriver'?currentDrivers().filter(d=>driverNameMatches(d,f.name)):findDrivers(f);if(o.targetId){const chosen=(input.kind==='insuredDriver'?currentDrivers():ds).find(d=>d.id===o.targetId);if(!chosen)fail('Selected driver no longer exists.');candidates=[chosen];}
+    candidates=input.kind==='insuredDriver'?currentDrivers().filter(d=>driverNameMatches(d,f.name)):(upload.sourceId==='services'?ds.filter(d=>driverNameMatches(d,f.name)):findDrivers(f));if(o.targetId){const chosen=(input.kind==='insuredDriver'?currentDrivers():ds).find(d=>d.id===o.targetId);if(!chosen)fail('Selected driver no longer exists.');candidates=[chosen];}
     if(candidates.length>1){row.status='blocked';row.message='Driver identifiers match more than one existing driver. Select the correct record and recheck.';row.candidates=candidates.map(d=>({id:d.id,label:d.name+' · '+(d.employeeId||'No employee number')}));}
     else if(candidates.length===1){const d=candidates[0];row.targetId=d.id;row.targetVersion=d.version;row.changes=input.kind==='insuredDriver'?[]:differences(d,f,driverKeys);row.status=row.changes.length?'changes':'matched';row.message=input.kind==='insuredDriver'?'Name listed in supplied insurance source; this does not approve driving.':'Existing driver matched; no duplicate will be created.';}
     else{row.status=input.kind==='insuredDriver'?'unmatched':'new';row.message=input.kind==='insuredDriver'?'Not in the current CC roster. Candidate for removal from insurance; no Driver Register record will be created.':'New driver candidate. Approval required to add.';}
@@ -125,7 +126,7 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
   for(const row of upload.rows.filter(r=>r.kind==='assignment')){
    const driverRow=upload.rows.find(r=>r.key===row.driverKey),plan=plans.find(p=>p.driverId===driverRow?.targetId);
    if(!driverRow?.automatic||!plan?.vehicleId||plan.reason||plan.ignored||row.assignmentConflict||row.manuallyMatched||!['changes','matched'].includes(row.status)||row.targetId!==plan.vehicleId)continue;
-   const v=get('vehicles',plan.vehicleId),d=get('drivers',driverRow.targetId);
+   const v=get('vehicles',plan.vehicleId),d=get('drivers',driverRow.targetId);if(d.isServiceDriver||v.section==='Services'||v.isServiceVehicle)continue;
    if(v.driverId!==d.id||v.driver!==d.name){const next={...v,driverId:d.id,driver:d.name,version:v.version+1,updatedAt:now()};put('vehicles',next);audit('Automatic driver link',next,'Unique CC VIN / plate matched without an identity conflict.',v);}
    row.status='matched';row.changes=[];row.automatic=true;row.message='Unique driver / vehicle match connected automatically.';
   }
@@ -172,7 +173,7 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
       const next={...target,...Object.fromEntries(row.changes.map(d=>[d.field,d.after])),version:target.version+1,updatedAt:now()};
       if(findDrivers(next).some(d=>d.id!==target.id))fail('Changing driver identifiers would duplicate another driver. Recheck.',409);put('drivers',next);if(next.name!==target.name)for(const v of vehicles().filter(v=>v.driverId===next.id))put('vehicles',{...v,driver:next.name,version:v.version+1,updatedAt:now()});audit('Driver update',null,`${target.name}: ${row.changes.map(d=>d.field).join(', ')} approved.`);target=next;counts.changed++;
      }
-     if(target){if(upload.sourceId==='cc'&&target.manualAdded){target={...target,manualAdded:false,version:target.version+1,updatedAt:now()};put('drivers',target);}driverTargets.set(row.key,target);put('driverEvidence',{id:'source-'+upload.id+'-'+row.key,driverId:target.id,sourceId:upload.sourceId,uploadId:upload.id,locator:row.locator,fields:row.fields,raw:row.raw,recordedAt:now()});counts.evidence++;}else counts.kept++;
+     if(target){if(upload.sourceId==='services'&&!target.isServiceDriver){target={...target,isServiceDriver:true,version:target.version+1,updatedAt:now()};put('drivers',target);}if(upload.sourceId==='cc'&&target.manualAdded){target={...target,manualAdded:false,version:target.version+1,updatedAt:now()};put('drivers',target);}driverTargets.set(row.key,target);put('driverEvidence',{id:'source-'+upload.id+'-'+row.key,driverId:target.id,sourceId:upload.sourceId,uploadId:upload.id,locator:row.locator,fields:row.fields,raw:row.raw,recordedAt:now()});counts.evidence++;}else counts.kept++;
      continue;
     }
     if(row.kind==='insuredDriver'){
@@ -183,6 +184,7 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
      if(d&&action==='ignore')put('drivers',{...d,ignoredAssignment:{vin:d.reportedVin,plate:d.reportedPlate},version:d.version+1,updatedAt:now()});
      if(d&&action==='apply'&&d.ignoredAssignment)put('drivers',{...d,ignoredAssignment:null,version:d.version+1,updatedAt:now()});
      if(target&&action==='apply'){
+      if(d?.isServiceDriver||target.section==='Services'||target.isServiceVehicle)fail('Services uses pooled vehicles, not fixed driver assignments.');
       if(d?.archived)fail('Restore this archived driver before assigning a vehicle.');
       if(!d)fail(`Approve adding or matching ${row.driverName} before applying their vehicle assignment.`);
       target={...target,driver:d.name,driverId:d.id,version:target.version+1,updatedAt:now()};put('vehicles',target);audit('Reviewed assignment',target,`${d.name} assigned after CC VIN / plate review.`);counts.changed++;
@@ -204,6 +206,7 @@ export function setupReconciliation({all,get,put,tx,audit,clean,ROOT}){
      put('vehicles',next);audit('Reviewed source update',next,`${upload.filename}: ${row.changes.map(d=>d.field).join(', ')} approved.`,target);target=next;counts.changed++;
     }
     if(target){
+     if(upload.sourceId==='services'){target={...target,section:'Services',isServiceVehicle:true,serviceVehicleNumber:row.fields.serviceVehicleNumber,version:target.version+1,updatedAt:now()};put('vehicles',target);}
      put('evidence',{id:'source-'+upload.id+'-'+row.key,vehicleId:target.id,sourceId:upload.sourceId,uploadId:upload.id,locator:row.locator,fields:row.fields,raw:row.raw,reportedVin:row.fields.vin,match:row.fields.vin===target.vin?'Exact VIN':'Manually matched; VIN differs'});counts.evidence++;
      for(const issue of all('issues').filter(i=>i.vehicleId===target.id&&i.status==='Open'&&i.message==='Reviewed upload differs from master'&&all('uploads').find(u=>u.id===i.uploadId)?.sourceId===upload.sourceId)){put('issues',{...issue,status:action==='ignore'?'Ignored':'Resolved',resolution:action==='ignore'?'Discrepancies explicitly ignored.':'Superseded by the latest accepted comparison.',resolvedAt:now()});}
      const remains=differences(target,row.fields,Object.keys(row.fields));if(remains.length&&action!=='ignore'){for(const d of remains)put('issues',{id:randomUUID(),vehicleId:target.id,field:d.field,message:'Reviewed upload differs from master',details:`${upload.filename}: ${d.field} reports ${d.after}; kept ${d.before}`,status:'Open',before:d.before,after:d.after,sourceId:upload.sourceId,uploadId:upload.id});put('vehicles',{...target,checks:{},verificationStatus:'Not yet verified',version:target.version+1});}
