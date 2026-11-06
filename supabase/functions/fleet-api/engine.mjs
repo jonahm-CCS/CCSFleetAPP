@@ -26,7 +26,7 @@ function clean(input,old={}){
  v.vin=v.vin.toUpperCase().replace(/\s/g,'');v.plate=v.plate.toUpperCase();v.plateState=v.plateState.toUpperCase();
  requireThat(!v.vin||/^[A-HJ-NPR-Z0-9]{17}$/.test(v.vin),'VIN must be 17 characters without I, O or Q. Leave an unknown VIN blank.');
  requireThat(v.vin||v.unitNumber||v.model,'Provide a VIN, CCS number, or provisional asset description.');
- for(const k of ['registrationExpiry','insuranceExpiry','odometerDate','lastOilChange','pmDueDate'])if(v[k])requireThat(/^\d{4}-\d{2}-\d{2}$/.test(v[k])&&!isNaN(Date.parse(v[k]))&&new Date(v[k]).toISOString().slice(0,10)===v[k],`Invalid ${k} date.`);
+ for(const k of ['registrationExpiry','insuranceExpiry','odometerDate','lastOilChange','pmDueDate'])if(v[k]&&v[k]!==old[k])requireThat(/^\d{4}-\d{2}-\d{2}$/.test(v[k])&&!isNaN(Date.parse(v[k]))&&new Date(v[k]).toISOString().slice(0,10)===v[k],`Invalid ${k} date.`);
  for(const k of ['year','odometer','lastOilMileage','pmDueMiles'])if(v[k])requireThat(Number.isFinite(Number(v[k]))&&Number(v[k])>=0&&(!['year'].includes(k)||Number.isInteger(Number(v[k]))&&Number(v[k])>=1900&&Number(v[k])<=2100),`Invalid ${k}.`);
  requireThat(['Unknown','Available','Maintenance','Out of service','Disposed'].includes(v.operationalState||'Unknown'),'Invalid operational status.');
  if(old.crashRepairActive&&v.operationalState!=='Disposed')v.operationalState='Out of service';v.operationalState=v.operationalState||'Unknown';v.condition=v.condition||'Unknown';v.driver=old.driver||'';v.id=old.id||randomUUID();v.createdAt=old.createdAt||now();v.updatedAt=now();v.version=(old.version||0)+1;
