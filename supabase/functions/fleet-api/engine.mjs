@@ -1,3 +1,4 @@
+import {applyReviewPolicy} from './review-policy.mjs';
 import {syncServices} from './services.mjs';
 import {Buffer} from 'node:buffer';
 import {randomUUID,createHash} from 'node:crypto';
@@ -54,6 +55,7 @@ export async function handleFleet(state,path,method,b){
   }
   audit('Section upgrade',null,`${filled} CCS sections populated from explicit Fleet Sheet Service Level labels; other records left blank.`);
  });
+ applyReviewPolicy({all,put,audit});
  const reconciliation=setupReconciliation({all,get,put,tx,audit,clean,ROOT});
  const syncPool=()=>syncServices({all,put,audit});syncPool();
  const linkDrivers=()=>connectDrivers({all:k=>k==='drivers'?reconciliation.currentDrivers():all(k),put,tx,audit});
