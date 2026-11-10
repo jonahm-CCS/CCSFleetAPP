@@ -87,7 +87,27 @@ export async function handleFleet(state,path,method,b){
  const send=(res,data,status=200)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(data));};
  const csvCell=v=>'"'+String(v??'').replace(/^[=+@-]/,"'$&").replace(/"/g,'""')+'"';
  async function run(){
-   if(path==='/api/bootstrap'&&method==='GET'){tx(()=>reconciliation.syncAssetCoverage());send(res,{driverLinkChecks:planDriverLinks(active(),reconciliation.currentDrivers()),insuranceComparison:reconciliation.insuranceReport(),token,vehicles:active(),drivers:reconciliation.currentDrivers().map(driverWithFlags),archivedDrivers:all('drivers').filter(d=>d.archived).map(driverWithFlags),driverEvidence:all('driverEvidence'),assignmentEvidence:all('assignmentEvidence'),sourceTypes:reconciliation.sourceTypes,uploads:all('uploads').map(u=>({id:u.id,sourceId:u.sourceId,filename:u.filename,uploadedAt:u.uploadedAt,acceptedAt:u.acceptedAt,status:u.status,storageAvailable:!!u.storagePath})),initialCCAvailable:false,sources:all('sources'),evidence:all('evidence'),issues:all('issues'),documents:all('documents').map(({base64,...d})=>d),audit:state.audit.slice(-300).reverse()});return;}
+   if(path==='/api/bootstrap'&&method==='GET'){tx(()=>reconciliation.syncAssetCoverage());send(res,{slackEvents:all('slackEvents').slice(-300).reverse(),slackConnection:all('slackConnection')[0]||null,driverLinkChecks:planDriverLinks(active(),reconciliation.currentDrivers()),insuranceComparison:reconciliation.insuranceReport(),token,vehicles:active(),drivers:reconciliation.currentDrivers().map(driverWithFlags),archivedDrivers:all('drivers').filter(d=>d.archived).map(driverWithFlags),driverEvidence:all('driverEvidence'),assignmentEvidence:all('assignmentEvidence'),sourceTypes:reconciliation.sourceTypes,uploads:all('uploads').map(u=>({id:u.id,sourceId:u.sourceId,filename:u.filename,uploadedAt:u.uploadedAt,acceptedAt:u.acceptedAt,status:u.status,storageAvailable:!!u.storagePath})),initialCCAvailable:false,sources:all('sources'),evidence:all('evidence'),issues:all('issues'),documents:all('documents').map(({base64,...d})=>d),audit:state.audit.slice(-300).reverse()});return;}
+   const slackReview=path.match(/^\/api\/slack-events\/([^/]+)\/review$/);
+   if(slackReview&&method==='POST'){
+    const item=get('slackEvents',slackReview[1]);requireThat(item.status.startsWith('Needs'),'This notice is already resolved.',409);
+    requireThat(['dismiss','link-check','swap'].includes(b.action),'Choose a review action.');
+    tx(()=>{
+     if(b.action!=='dismiss'){
+      const v=get('vehicles',b.vehicleId);version(v,b);
+      if(b.action==='swap'){
+       requireThat(item.type==='driver-swap','This notice is not a driver swap.');
+       assignDriver(v.id,b.driverId,b);
+      }else{
+       requireThat(item.type==='vehicle-check','This notice is not a vehicle check.');
+       const next={...v,slackInspections:[...(v.slackInspections||[]),{eventId:item.id,url:item.url,text:item.text,files:item.files,reportedAt:item.messageAt,linkedAt:now()}],version:v.version+1,updatedAt:now()};
+       put('vehicles',next);audit('Slack inspection linked',next,'Physical report linked. Complete the verification checklist separately.',v);
+      }
+      item.vehicleId=v.id;
+     }
+     item.status=b.action==='dismiss'?'Dismissed':'Reviewed';item.reviewedAt=now();put('slackEvents',item);audit('Slack notice reviewed',null,item.type+': '+item.status);
+    });send(res,item);return;
+   }
    const editDriver=path.match(/^\/api\/drivers\/([^/]+)$/);
    if(editDriver&&method==='PUT'){
     const old=get('drivers',editDriver[1]);version(old,b);const fields={};
