@@ -37,9 +37,12 @@ function clean(input,old={}){
 }
 
 export async function handleFleet(state,path,method,b){
+ const numericUnit=x=>/^\d{1,4}$/.test(String(x||''))&&Number(x)>0;
+ const allocateUnit=()=>{const max=Math.max(state.vehicleNumberSequence||0,...(state.records.vehicles||[]).filter(v=>numericUnit(v.unitNumber)).map(v=>Number(v.unitNumber)));requireThat(max<9999,'CCS vehicle number sequence is full.');state.vehicleNumberSequence=max+1;return String(max+1).padStart(4,'0');};
+ for(const v of state.records.vehicles||[])if(!v.mergedInto&&!numericUnit(v.unitNumber)){const before=structuredClone(v);v.previousUnitNumber=v.unitNumber||'';v.unitNumber=allocateUnit();v.version=(v.version||0)+1;state.audit.push({id:randomUUID(),time:now(),action:'Assign CCS number',vehicleId:v.id,note:`Assigned CCS ${v.unitNumber}; previous label: ${v.previousUnitNumber||'blank'}`,before,after:structuredClone(v)});}
  const all=k=>structuredClone((state.records[k]||[]).filter(r=>k!=='drivers'||!r.voidedByUpload));
  const get=(k,id)=>{const r=all(k).find(x=>x.id===id);if(!r)fail('Record not found.',404);return r;};
- const put=(k,v)=>{if(k==='vehicles'&&v.vin&&!v.mergedInto&&all(k).some(x=>x.id!==v.id&&!x.mergedInto&&x.vin===v.vin))fail('That VIN already exists.',409);const rows=state.records[k]??=[];const i=rows.findIndex(x=>x.id===v.id);if(i<0)rows.push(structuredClone(v));else rows[i]=structuredClone(v);return v;};
+ const put=(k,v)=>{if(k==='vehicles'){const existing=(state.records.vehicles||[]).find(x=>x.id===v.id);if(existing)v.unitNumber=existing.unitNumber;else {v.previousUnitNumber=v.unitNumber||'';v.unitNumber=allocateUnit();}}if(k==='vehicles'&&v.vin&&!v.mergedInto&&all(k).some(x=>x.id!==v.id&&!x.mergedInto&&x.vin===v.vin))fail('That VIN already exists.',409);const rows=state.records[k]??=[];const i=rows.findIndex(x=>x.id===v.id);if(i<0)rows.push(structuredClone(v));else rows[i]=structuredClone(v);return v;};
  const tx=fn=>{const before=structuredClone(state);try{return fn();}catch(e){state.records=before.records;state.audit=before.audit;throw e;}};
  const audit=(action,v,note,before=null)=>state.audit.push({id:randomUUID(),time:now(),action,vehicleId:v?.id||'',note,before,after:v});
  let status=200,headers={},body='';
