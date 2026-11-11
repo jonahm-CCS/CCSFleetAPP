@@ -45,3 +45,5 @@ tr.crash-repair-row>td:first-child{border-left:4px solid #facc15}
 .insurance-priority{display:inline-block;color:#ff8c95;background:#50232d;border:1px solid #c64958;border-radius:5px;padding:5px 8px;font-size:12px;font-weight:700;margin:4px 0}.overview-metric[data-gap="insurance"]{border-color:#c64958}.overview-metric[data-gap="insurance"] strong,.overview-metric[data-gap="insurance"] small{color:#ff8c95}.overview-metrics{grid-template-columns:repeat(auto-fit,minmax(190px,1fr))}
 
 .overview-bar[data-overview-driver="insurance"]{color:#ff8c95}.overview-bar[data-overview-driver="insurance"] .overview-track>span{background:#e35c6d}
+
+.asset-total-card{display:flex;flex-direction:column;border:1px solid #2c4658;border-radius:12px;background:#122333;overflow:hidden}.asset-total-card .overview-metric{border:0;flex:1;border-radius:0}.asset-export{align-self:flex-start;margin:0 23px 18px}
