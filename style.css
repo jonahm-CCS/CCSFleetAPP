@@ -56,3 +56,30 @@ tr.crash-repair-row>td:first-child{border-left:4px solid #facc15}
 .insurance-sublist{border-top-color:#36a96c}
 .insurance-review-metrics .driver-metric-main:hover{background:#15372c}
 .insurance-collapse summary:focus-visible,.insurance-review-metrics button:focus-visible{outline:2px solid #6bdb9b;outline-offset:-4px}
+
+/* Separate reconciliation metrics and consistent source colors. */
+.source-green{--source-border:#36a96c;--source-text:#6bdb9b}
+.source-blue{--source-border:#168fc4;--source-text:#48cbf3}
+.source-red{--source-border:#cd5363;--source-text:#ff8c95}
+.source-green,.source-blue,.source-red,.insurance-review-metrics .driver-metric{border:2px solid var(--source-border);border-radius:12px}
+.insurance-review-metrics .driver-metric-main>span,.insurance-review-metrics .driver-metric-main>strong,
+.source-green .driver-metric-main>span,.source-green .driver-metric-main>strong,.source-blue .driver-metric-main>span,.source-blue .driver-metric-main>strong,
+.source-green .vehicle-gap-main>span,.source-green .vehicle-gap-main>strong,.source-red .vehicle-gap-main>span,.source-red .vehicle-gap-main>strong{color:var(--source-text)}
+.reconciliation-metric-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px;margin:20px 0;align-items:start}
+.reconciliation-metric{background:#122333;overflow:hidden}
+.reconciliation-metric>summary{list-style:none;cursor:pointer;padding:22px;display:flex;flex-direction:column;gap:12px}
+.reconciliation-metric>summary::-webkit-details-marker{display:none}
+.reconciliation-metric>summary>span{font-weight:700;color:var(--source-text)}
+.reconciliation-metric>summary>strong{font-size:36px;color:var(--source-text)}
+.reconciliation-metric>summary>small{color:#94afc4}
+.reconciliation-metric>summary:hover{background:#173528}
+.reconciliation-metric>summary:focus-visible{outline:2px solid var(--source-text);outline-offset:-5px}
+.reconciliation-list{padding:0 22px 22px}
+.upload-group.blue{border-color:#168fc4}.upload-group.blue>h2{color:#48cbf3}
+.upload-group.red{border-color:#cd5363}.upload-group.red>h2{color:#ff8c95}
+.insurance-review-metrics .source-blue .driver-metric-main:hover{background:#12374c}
+.overview-metric[data-gap="insurance"]{border-color:#36a96c}
+.overview-metric[data-gap="insurance"]>span:first-child,.overview-metric[data-gap="insurance"] strong{color:#6bdb9b}
+.overview-metric[data-gap="samsara"]{border-color:#cd5363}
+.overview-metric[data-gap="samsara"]>span:first-child,.overview-metric[data-gap="samsara"] strong{color:#ff8c95}
+@media(max-width:850px){.reconciliation-metric-grid{grid-template-columns:1fr}}
