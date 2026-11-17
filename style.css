@@ -47,3 +47,12 @@ tr.crash-repair-row>td:first-child{border-left:4px solid #facc15}
 .overview-bar[data-overview-driver="insurance"]{color:#ff8c95}.overview-bar[data-overview-driver="insurance"] .overview-track>span{background:#e35c6d}
 
 .asset-total-card{display:flex;flex-direction:column;border:1px solid #2c4658;border-radius:12px;background:#122333;overflow:hidden}.asset-total-card .overview-metric{border:0;flex:1;border-radius:0}.asset-export{align-self:flex-start;margin:0 23px 18px}
+
+/* Match insurance reconciliation and metrics to Insurance uploads. */
+.insurance-collapse,.insurance-review-metrics .driver-metric{border:2px solid #36a96c;border-radius:12px}
+.insurance-collapse>summary,.insurance-sublist>summary,.insurance-review-metrics .driver-metric-main>span,.insurance-review-metrics .driver-metric-main>strong{color:#6bdb9b}
+.insurance-collapse>summary{border-bottom:1px solid #36a96c}
+.insurance-collapse:not([open])>summary{border-bottom:0}
+.insurance-sublist{border-top-color:#36a96c}
+.insurance-review-metrics .driver-metric-main:hover{background:#15372c}
+.insurance-collapse summary:focus-visible,.insurance-review-metrics button:focus-visible{outline:2px solid #6bdb9b;outline-offset:-4px}
